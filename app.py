@@ -181,8 +181,8 @@ top_players = (
 
 # ── Tabs ──────────────────────────────────────────────────────────────────────
 
-tab1, tab2, tab3, tab4, tab5 = st.tabs([
-    "📊 Server Totals", "📦 Power Distribution", "🏰 Alliances", "🔍 Player Table", "⚖️ Tale of the Tape"
+tab5, tab1, tab2, tab3, tab4 = st.tabs([
+    "⚖️ Tale of the Tape", "📊 Server Totals", "📦 Power Distribution", "🏰 Alliances", "🔍 Player Table"
 ])
 
 
@@ -397,7 +397,7 @@ with tab5:
 
     tape_defaults = [s for s in DEFAULT_SERVERS if s in all_servers]
     default_a = 241 if 241 in all_servers else (tape_defaults[0] if tape_defaults else all_servers[0])
-    default_b = tape_defaults[1] if len(tape_defaults) > 1 else (all_servers[1] if len(all_servers) > 1 else all_servers[0])
+    default_b = 249 if 249 in all_servers else (tape_defaults[1] if len(tape_defaults) > 1 else (all_servers[1] if len(all_servers) > 1 else all_servers[0]))
 
     col_l, col_mid, col_r = st.columns([5, 1, 5])
     server_a = col_l.selectbox("Left Server", all_servers,
