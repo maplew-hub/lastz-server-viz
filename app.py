@@ -227,7 +227,19 @@ CATEGORY_SUMMARY_COLUMN_CONFIG = {
     "Total Power": st.column_config.NumberColumn(format="compact"),
 }
 
+def _coerce_str(df, cols):
+    """Force text columns to str. Sheets mode infers cell types per-value, so a
+    purely-numeric name/tag (e.g. a player named "12345") comes back as a Python
+    int while every other row is str — that mixed-type object column crashes
+    PyArrow's Table.from_pandas (ArrowTypeError), which previously segfaulted the
+    whole app rather than raising a catchable Streamlit error."""
+    for col in cols:
+        if col in df.columns:
+            df[col] = df[col].astype(str)
+
 def prepare(players_df, alliances_df):
+    _coerce_str(players_df, ["Name", "Tag", "Alliance"])
+    _coerce_str(alliances_df, ["Alliance", "Tag"])
     _coerce_numeric(players_df, ["Power", "Max Power", "Migrate Power", "Hero Power",
                                   "Building", "Science", "Troop", "Tank", "HQ", "Server",
                                   "Orig Server", "S3 Server"])
