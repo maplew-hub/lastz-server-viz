@@ -153,10 +153,12 @@ NET_CATS = ["Elite", "Advanced", "Medium"]
 
 def net_category_table(df, from_col, to_col):
     """Per-server net players gained/lost (joined - left) for each of NET_CATS, with the
-    net power moved shown alongside each count, plus a leading Net Total Power column
-    (net power across ALL players, not just NET_CATS). Rows cover every server appearing
-    on either side of the migration; sorted by the magnitude of total net player change
-    (across NET_CATS), biggest turnover first."""
+    net power moved as its own numeric column next to each count, plus a leading
+    Net Total Power column (net power across ALL players, not just NET_CATS). Rows cover
+    every server appearing on either side of the migration; sorted by the magnitude of
+    total net player change (across NET_CATS), biggest turnover first. All numeric —
+    formatting for display is applied via column_config at the call site so that
+    st.dataframe's column-header sort stays numeric instead of alphabetic."""
     d = df.dropna(subset=[from_col, to_col]).copy()
     d[from_col] = d[from_col].astype(int)
     d[to_col]   = d[to_col].astype(int)
@@ -171,14 +173,15 @@ def net_category_table(df, from_col, to_col):
         left_all   = d[(d[from_col] == s) & (d[to_col] != s)]
         total_net_power = joined_all["_Power"].sum() - left_all["_Power"].sum()
 
-        row = {"Server": s, "Net Total Power": fmt_power_delta(total_net_power)}
+        row = {"Server": s, "Net Total Power": total_net_power}
         total_net_count = 0
         for c in NET_CATS:
             j = joined_all[joined_all["_Category"] == c]
             l = left_all[left_all["_Category"] == c]
             net_count = len(j) - len(l)
             net_power = j["_Power"].sum() - l["_Power"].sum()
-            row[f"Net {c}"] = f"{net_count:+d}  ({fmt_power_delta(net_power)})"
+            row[f"Net {c} Players"] = net_count
+            row[f"Net {c} Power"]   = net_power
             total_net_count += net_count
         row["_sort"] = abs(total_net_count)
         records.append(row)
@@ -187,21 +190,42 @@ def net_category_table(df, from_col, to_col):
            .sort_values("_sort", ascending=False)
            .drop(columns="_sort")
            .reset_index(drop=True))
-    return out[["Server", "Net Total Power"] + [f"Net {c}" for c in NET_CATS]]
+    cols = ["Server", "Net Total Power"]
+    for c in NET_CATS:
+        cols += [f"Net {c} Players", f"Net {c} Power"]
+    return out[cols]
+
+NET_TABLE_COLUMN_CONFIG = {
+    "Server": st.column_config.NumberColumn(format="%d"),
+    "Net Total Power": st.column_config.NumberColumn(format="compact"),
+    **{
+        f"Net {c} Players": st.column_config.NumberColumn(format="%+d")
+        for c in NET_CATS
+    },
+    **{
+        f"Net {c} Power": st.column_config.NumberColumn(format="compact")
+        for c in NET_CATS
+    },
+}
 
 def category_summary(df):
-    """Category, Count, Total Power table for a slice of players_df."""
+    """Category, Count, Total Power table for a slice of players_df. Total Power stays
+    numeric (raw sum) — format for display via column_config, not a pre-formatted string,
+    so st.dataframe's column sort stays numeric."""
     d = df.copy()
     d["Category"] = categorize(d["Migrate Power"])
     summary = (
         d.groupby("Category")
-        .agg(Count=("Name", "size"), _total_power=("Power", "sum"))
+        .agg(Count=("Name", "size"), **{"Total Power": ("Power", "sum")})
         .reindex(CAT_ORDER)
         .fillna(0)
     )
     summary["Count"] = summary["Count"].astype(int)
-    summary["Total Power"] = summary["_total_power"].apply(fmt_power)
     return summary[["Count", "Total Power"]].reset_index()
+
+CATEGORY_SUMMARY_COLUMN_CONFIG = {
+    "Total Power": st.column_config.NumberColumn(format="compact"),
+}
 
 def prepare(players_df, alliances_df):
     _coerce_numeric(players_df, ["Power", "Max Power", "Migrate Power", "Hero Power",
@@ -605,7 +629,8 @@ with tab6:
         with otab:
             table = net_category_table(players_df, from_col, to_col)
             full_height = 38 + 35 * len(table) + 3  # header + one row per server, no inner scroll
-            st.dataframe(table, hide_index=True, width='stretch', height=full_height)
+            st.dataframe(table, hide_index=True, width='stretch', height=full_height,
+                         column_config=NET_TABLE_COLUMN_CONFIG)
 
     # ── Per-server turnover detail ──────────────────────────────────────────────
     st.markdown("### Per-Server Detail")
@@ -647,16 +672,18 @@ with tab6:
         with box_col:
             st.markdown(f"**{title}**")
             st.caption(f"{len(box_df):,} players · {fmt_power(box_df['Power'].sum())} total power")
-            st.dataframe(category_summary(box_df), hide_index=True, width='stretch')
+            st.dataframe(category_summary(box_df), hide_index=True, width='stretch',
+                         column_config=CATEGORY_SUMMARY_COLUMN_CONFIG)
 
     detail_tabs = st.tabs([title for title, _ in boxes])
     for dtab, (title, box_df) in zip(detail_tabs, boxes):
         with dtab:
             disp = box_df.sort_values("Power", ascending=False).copy()
-            for c in ["Power", "Migrate Power"]:
-                disp[c] = disp[c].apply(fmt_power)
             display_cols = ["Name", "Tag", "Alliance", "HQ", "Power", "Migrate Power",
                             "Orig Server", "S3 Server", "Server"]
             display_cols = [c for c in display_cols if c in disp.columns]
-            st.dataframe(disp[display_cols], hide_index=True, width='stretch')
+            st.dataframe(disp[display_cols], hide_index=True, width='stretch', column_config={
+                "Power": st.column_config.NumberColumn(format="compact"),
+                "Migrate Power": st.column_config.NumberColumn(format="compact"),
+            })
             st.caption(f"{len(disp):,} players shown")
