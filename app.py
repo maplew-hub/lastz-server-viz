@@ -115,6 +115,9 @@ def load_data_sheets():
     sh = gc.open_by_key(st.secrets["sheet_id"])
     players_df = pd.DataFrame(sh.worksheet("All Players").get_all_records())
     alliances_df = pd.DataFrame(sh.worksheet("Alliances").get_all_records())
+    # Tolerate a stale header name from an older sync of the "All Players" sheet.
+    if "Server" not in players_df.columns and "Current Server" in players_df.columns:
+        players_df = players_df.rename(columns={"Current Server": "Server"})
     return players_df, alliances_df
 
 def load_data():
