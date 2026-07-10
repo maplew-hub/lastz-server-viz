@@ -142,20 +142,36 @@ def categorize(migrate_power_series):
     cat[mp > 160_000_000] = "Elite"
     return cat
 
-def migration_overview_rows(df, from_col, to_col):
-    """Stayed-vs-Moved comparison rows for render_tape, plus the two slices themselves."""
-    d = df.dropna(subset=[from_col, to_col]).copy()
-    stayed = d[d[from_col] == d[to_col]]
-    moved  = d[d[from_col] != d[to_col]]
+NET_CATS = ["Elite", "Advanced", "Medium"]
 
-    rows = [
-        ("Players", len(stayed), len(moved), f"{len(stayed):,}", f"{len(moved):,}"),
-        ("Total Power", stayed["Power"].sum(), moved["Power"].sum(),
-         fmt_power(stayed["Power"].sum()), fmt_power(moved["Power"].sum())),
-        ("Total Migrate Power", stayed["Migrate Power"].sum(), moved["Migrate Power"].sum(),
-         fmt_power(stayed["Migrate Power"].sum()), fmt_power(moved["Migrate Power"].sum())),
-    ]
-    return rows, stayed, moved
+def net_category_table(df, from_col, to_col):
+    """Per-server net players gained/lost (joined - left) for each of NET_CATS.
+    Rows cover every server appearing on either side of the migration; sorted by
+    the magnitude of total net change (across NET_CATS), biggest turnover first."""
+    d = df.dropna(subset=[from_col, to_col]).copy()
+    d[from_col] = d[from_col].astype(int)
+    d[to_col]   = d[to_col].astype(int)
+    d["_Category"] = categorize(d["Migrate Power"])
+
+    servers = sorted(set(d[from_col].unique()) | set(d[to_col].unique()))
+
+    records = []
+    for s in servers:
+        joined = d[(d[to_col] == s) & (d[from_col] != s)]["_Category"].value_counts()
+        left   = d[(d[from_col] == s) & (d[to_col] != s)]["_Category"].value_counts()
+        row = {"Server": s}
+        total_net = 0
+        for c in NET_CATS:
+            net = int(joined.get(c, 0)) - int(left.get(c, 0))
+            row[f"Net {c}"] = net
+            total_net += net
+        row["_sort"] = abs(total_net)
+        records.append(row)
+
+    return (pd.DataFrame(records)
+            .sort_values("_sort", ascending=False)
+            .drop(columns="_sort")
+            .reset_index(drop=True))
 
 def category_summary(df):
     """Category, Count, Total Power table for a slice of players_df."""
@@ -562,25 +578,17 @@ with tab6:
         st.warning("Orig Server / S3 Server columns not found in the data source yet.")
         st.stop()
 
-    # ── High-level overview: both migrations, all servers ─────────────────────
-    st.markdown("### Overview — All Servers")
+    # ── High-level overview: net players gained/lost by category, per server ──
+    st.markdown("### Overview by Migration")
+    st.caption("Net = players joined minus players left, by category, for that migration stage. "
+               "Sorted by biggest total turnover first.")
 
-    for mig_label, from_col, to_col in [
-        ("Migration 1  (Original → S3)", "Orig Server", "S3 Server"),
-        ("Migration 2  (S3 → Current)",  "S3 Server",   "Server"),
-    ]:
-        st.markdown(f"#### {mig_label}")
-        rows, stayed, moved = migration_overview_rows(players_df, from_col, to_col)
-        st.markdown(render_tape(rows, "stayed", "moved",
-                                 header_a="Stayed", header_b="Moved"),
-                    unsafe_allow_html=True)
-
-        cat_col_l, cat_col_r = st.columns(2)
-        cat_col_l.caption("Stayed — by category")
-        cat_col_l.dataframe(category_summary(stayed), hide_index=True, width='stretch')
-        cat_col_r.caption("Moved — by category")
-        cat_col_r.dataframe(category_summary(moved), hide_index=True, width='stretch')
-        st.markdown("---")
+    overview_tabs = st.tabs(["Migration 1 (Original → S3)", "Migration 2 (S3 → Current)"])
+    for otab, (from_col, to_col) in zip(overview_tabs, [("Orig Server", "S3 Server"),
+                                                         ("S3 Server",   "Server")]):
+        with otab:
+            table = net_category_table(players_df, from_col, to_col)
+            st.dataframe(table, hide_index=True, width='stretch')
 
     # ── Per-server turnover detail ──────────────────────────────────────────────
     st.markdown("### Per-Server Detail")
