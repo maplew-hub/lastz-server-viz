@@ -14,24 +14,29 @@ def fmt_power(val):
     if pd.isna(val):
         return "—"
     val = int(val)
+    if val >= 1_000_000_000_000:
+        return f"{val / 1_000_000_000_000:.2f}T"
     if val >= 1_000_000_000:
         return f"{val / 1_000_000_000:.2f}B"
     if val >= 1_000_000:
         return f"{val / 1_000_000:.1f}M"
     return f"{val:,}"
 
-def render_tape(rows, label_a, label_b):
+def render_tape(rows, label_a, label_b, header_a=None, header_b=None):
     """Build a boxing-style tale of the tape HTML table.
     rows: list of (label, raw_a, raw_b, fmt_a, fmt_b)
+    header_a/header_b: full header text override (default "Server {label}")
     """
+    header_a = header_a or f"Server {label_a}"
+    header_b = header_b or f"Server {label_b}"
     html = f"""<table style="width:100%;border-collapse:collapse;margin:8px 0;">
     <thead><tr>
         <th style="text-align:right;color:#e63946;padding:10px 20px;font-size:1.15em;width:35%;">
-            Server {label_a}</th>
+            {header_a}</th>
         <th style="text-align:center;color:#555;width:30%;font-weight:normal;font-size:0.85em;
             border-left:1px solid #333;border-right:1px solid #333;">STAT</th>
         <th style="text-align:left;color:#4ecdc4;padding:10px 20px;font-size:1.15em;width:35%;">
-            Server {label_b}</th>
+            {header_b}</th>
     </tr></thead><tbody>"""
 
     for label, raw_a, raw_b, fmt_a, fmt_b in rows:
@@ -75,7 +80,9 @@ def load_data_local():
     con = sqlite3.connect(LOCAL_DB)
     players_df = pd.read_sql_query("""
         SELECT name AS Name, alliance_abbr AS Tag, alliance_name AS Alliance,
-               hq_level AS HQ, server AS Server, power AS Power,
+               hq_level AS HQ, server AS Server,
+               original_server AS [Orig Server], s3_server AS [S3 Server],
+               power AS Power,
                migrate_power AS [Migrate Power], hero_power AS [Hero Power],
                building_power AS Building, science_power AS Science,
                army_power AS Troop, tank_power AS Tank,
@@ -120,9 +127,51 @@ def _coerce_numeric(df, cols):
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce")
 
+CAT_ORDER = ["Elite", "Advanced", "Medium", "Regular", "Unscanned"]
+
+def categorize(migrate_power_series):
+    """Elite >160M, Advanced >80M, Medium >40M, Regular (scanned, <=40M), Unscanned (no migrate power)."""
+    mp = pd.to_numeric(migrate_power_series, errors="coerce")
+    cat = pd.Series("Unscanned", index=migrate_power_series.index)
+    cat[mp.notna()]      = "Regular"
+    cat[mp > 40_000_000]  = "Medium"
+    cat[mp > 80_000_000]  = "Advanced"
+    cat[mp > 160_000_000] = "Elite"
+    return cat
+
+def migration_overview_rows(df, from_col, to_col):
+    """Stayed-vs-Moved comparison rows for render_tape, plus the two slices themselves."""
+    d = df.dropna(subset=[from_col, to_col]).copy()
+    stayed = d[d[from_col] == d[to_col]]
+    moved  = d[d[from_col] != d[to_col]]
+
+    rows = [
+        ("Players", len(stayed), len(moved), f"{len(stayed):,}", f"{len(moved):,}"),
+        ("Total Power", stayed["Power"].sum(), moved["Power"].sum(),
+         fmt_power(stayed["Power"].sum()), fmt_power(moved["Power"].sum())),
+        ("Total Migrate Power", stayed["Migrate Power"].sum(), moved["Migrate Power"].sum(),
+         fmt_power(stayed["Migrate Power"].sum()), fmt_power(moved["Migrate Power"].sum())),
+    ]
+    return rows, stayed, moved
+
+def category_summary(df):
+    """Category, Count, Total Power table for a slice of players_df."""
+    d = df.copy()
+    d["Category"] = categorize(d["Migrate Power"])
+    summary = (
+        d.groupby("Category")
+        .agg(Count=("Name", "size"), _total_power=("Power", "sum"))
+        .reindex(CAT_ORDER)
+        .fillna(0)
+    )
+    summary["Count"] = summary["Count"].astype(int)
+    summary["Total Power"] = summary["_total_power"].apply(fmt_power)
+    return summary[["Count", "Total Power"]].reset_index()
+
 def prepare(players_df, alliances_df):
     _coerce_numeric(players_df, ["Power", "Max Power", "Migrate Power", "Hero Power",
-                                  "Building", "Science", "Troop", "Tank", "HQ", "Server"])
+                                  "Building", "Science", "Troop", "Tank", "HQ", "Server",
+                                  "Orig Server", "S3 Server"])
     _coerce_numeric(alliances_df, ["Fight Power", "Server", "Rank", "Members",
                                     "Max Members", "Players in DB", "With Migrate"])
     return players_df, alliances_df
@@ -181,8 +230,9 @@ top_players = (
 
 # ── Tabs ──────────────────────────────────────────────────────────────────────
 
-tab5, tab1, tab2, tab3, tab4 = st.tabs([
-    "⚖️ Tale of the Tape", "📊 Server Totals", "📦 Power Distribution", "🏰 Alliances", "🔍 Player Table"
+tab5, tab1, tab2, tab3, tab4, tab6 = st.tabs([
+    "⚖️ Tale of the Tape", "📊 Server Totals", "📦 Power Distribution", "🏰 Alliances", "🔍 Player Table",
+    "🔄 Migration Turnover"
 ])
 
 
@@ -495,3 +545,90 @@ with tab5:
                 tier_rows.append((f"Top {n}", sum_a, sum_b, fmt_power(sum_a), fmt_power(sum_b)))
 
             st.markdown(render_tape(tier_rows, server_a, server_b), unsafe_allow_html=True)
+
+
+# ── Tab 6: Migration Turnover ─────────────────────────────────────────────────
+
+with tab6:
+    st.subheader("🔄 Migration Turnover")
+    st.caption("Uses current Power/Migrate Power snapshots — there's no historical power-at-migration-time data, "
+               "so this compares who moved vs. stayed using today's numbers.")
+
+    have_mig_cols = "Orig Server" in players_df.columns and "S3 Server" in players_df.columns
+    if not have_mig_cols:
+        st.warning("Orig Server / S3 Server columns not found in the data source yet.")
+        st.stop()
+
+    # ── High-level overview: both migrations, all servers ─────────────────────
+    st.markdown("### Overview — All Servers")
+
+    for mig_label, from_col, to_col in [
+        ("Migration 1  (Original → S3)", "Orig Server", "S3 Server"),
+        ("Migration 2  (S3 → Current)",  "S3 Server",   "Server"),
+    ]:
+        st.markdown(f"#### {mig_label}")
+        rows, stayed, moved = migration_overview_rows(players_df, from_col, to_col)
+        st.markdown(render_tape(rows, "stayed", "moved",
+                                 header_a="Stayed", header_b="Moved"),
+                    unsafe_allow_html=True)
+
+        cat_col_l, cat_col_r = st.columns(2)
+        cat_col_l.caption("Stayed — by category")
+        cat_col_l.dataframe(category_summary(stayed), hide_index=True, width='stretch')
+        cat_col_r.caption("Moved — by category")
+        cat_col_r.dataframe(category_summary(moved), hide_index=True, width='stretch')
+        st.markdown("---")
+
+    # ── Per-server turnover detail ──────────────────────────────────────────────
+    st.markdown("### Per-Server Detail")
+
+    mig_choice = st.selectbox(
+        "Migration stage",
+        ["Migration 1 (Original → S3)", "Migration 2 (S3 → Current)"],
+        key="turnover_mig_choice",
+    )
+    if mig_choice.startswith("Migration 1"):
+        from_col, to_col = "Orig Server", "S3 Server"
+    else:
+        from_col, to_col = "S3 Server", "Server"
+
+    mig_df = players_df.dropna(subset=[from_col, to_col]).copy()
+    mig_df[from_col] = mig_df[from_col].astype(int)
+    mig_df[to_col]   = mig_df[to_col].astype(int)
+
+    server_options = sorted(set(mig_df[from_col].unique()) | set(mig_df[to_col].unique()))
+    if not server_options:
+        st.info("No players with both ends of this migration recorded yet.")
+        st.stop()
+    turnover_server = st.selectbox("Server", server_options, key="turnover_server")
+
+    stayed_box  = mig_df[(mig_df[from_col] == turnover_server) & (mig_df[to_col] == turnover_server)]
+    joined_box  = mig_df[(mig_df[to_col] == turnover_server)   & (mig_df[from_col] != turnover_server)]
+    left_box    = mig_df[(mig_df[from_col] == turnover_server) & (mig_df[to_col] != turnover_server)]
+    current_box = mig_df[mig_df[to_col] == turnover_server]
+
+    boxes = [
+        ("✅ Stayed",  stayed_box),
+        ("➡️ Joined",  joined_box),
+        ("⬅️ Left",    left_box),
+        ("🏠 Current (post-migration)", current_box),
+    ]
+
+    box_cols = st.columns(4)
+    for box_col, (title, box_df) in zip(box_cols, boxes):
+        with box_col:
+            st.markdown(f"**{title}**")
+            st.caption(f"{len(box_df):,} players · {fmt_power(box_df['Power'].sum())} total power")
+            st.dataframe(category_summary(box_df), hide_index=True, width='stretch')
+
+    detail_tabs = st.tabs([title for title, _ in boxes])
+    for dtab, (title, box_df) in zip(detail_tabs, boxes):
+        with dtab:
+            disp = box_df.sort_values("Power", ascending=False).copy()
+            for c in ["Power", "Migrate Power"]:
+                disp[c] = disp[c].apply(fmt_power)
+            display_cols = ["Name", "Tag", "Alliance", "HQ", "Power", "Migrate Power",
+                            "Orig Server", "S3 Server", "Server"]
+            display_cols = [c for c in display_cols if c in disp.columns]
+            st.dataframe(disp[display_cols], hide_index=True, width='stretch')
+            st.caption(f"{len(disp):,} players shown")
