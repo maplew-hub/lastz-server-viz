@@ -630,32 +630,30 @@ with tab6:
         st.warning("Orig Server / S3 Server columns not found in the data source yet.")
         st.stop()
 
+    # ── Shared migration-stage selector — drives both sections below ──────────
+    migration_choice = st.selectbox(
+        "Migration stage",
+        ["Migration 1 (Original → S3)", "Migration 2 (S3 → Current)"],
+        index=1,  # default to Migration 2
+        key="turnover_mig_choice",
+    )
+    if migration_choice.startswith("Migration 1"):
+        from_col, to_col = "Orig Server", "S3 Server"
+    else:
+        from_col, to_col = "S3 Server", "Server"
+
     # ── High-level overview: net players gained/lost by category, per server ──
     st.markdown("### Overview by Migration")
     st.caption("Net = players joined minus players left, by category, for that migration stage. "
                "Sorted by biggest total turnover first.")
 
-    overview_tabs = st.tabs(["Migration 1 (Original → S3)", "Migration 2 (S3 → Current)"])
-    for otab, (from_col, to_col) in zip(overview_tabs, [("Orig Server", "S3 Server"),
-                                                         ("S3 Server",   "Server")]):
-        with otab:
-            table = net_category_table(players_df, from_col, to_col)
-            full_height = 38 + 35 * len(table) + 3  # header + one row per server, no inner scroll
-            st.dataframe(table, hide_index=True, width='stretch', height=full_height,
-                         column_config=NET_TABLE_COLUMN_CONFIG)
+    table = net_category_table(players_df, from_col, to_col)
+    full_height = 38 + 35 * len(table) + 3  # header + one row per server, no inner scroll
+    st.dataframe(table, hide_index=True, width='stretch', height=full_height,
+                 column_config=NET_TABLE_COLUMN_CONFIG)
 
     # ── Per-server turnover detail ──────────────────────────────────────────────
     st.markdown("### Per-Server Detail")
-
-    mig_choice = st.selectbox(
-        "Migration stage",
-        ["Migration 1 (Original → S3)", "Migration 2 (S3 → Current)"],
-        key="turnover_mig_choice",
-    )
-    if mig_choice.startswith("Migration 1"):
-        from_col, to_col = "Orig Server", "S3 Server"
-    else:
-        from_col, to_col = "S3 Server", "Server"
 
     mig_df = players_df.dropna(subset=[from_col, to_col]).copy()
     mig_df[from_col] = mig_df[from_col].astype(int)
