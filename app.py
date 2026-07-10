@@ -667,13 +667,13 @@ with tab6:
         st.stop()
     turnover_server = st.selectbox("Server", server_options, key="turnover_server")
 
-    stayed_box  = mig_df[(mig_df[from_col] == turnover_server) & (mig_df[to_col] == turnover_server)]
+    prior_box   = mig_df[mig_df[from_col] == turnover_server]  # everyone there before (stayed + left)
     joined_box  = mig_df[(mig_df[to_col] == turnover_server)   & (mig_df[from_col] != turnover_server)]
     left_box    = mig_df[(mig_df[from_col] == turnover_server) & (mig_df[to_col] != turnover_server)]
     current_box = mig_df[mig_df[to_col] == turnover_server]
 
     boxes = [
-        ("✅ Stayed",  stayed_box),
+        ("📋 Prior to Migration", prior_box),
         ("➡️ Joined",  joined_box),
         ("⬅️ Left",    left_box),
         ("🏠 Current (post-migration)", current_box),
