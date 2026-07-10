@@ -22,6 +22,13 @@ def fmt_power(val):
         return f"{val / 1_000_000:.1f}M"
     return f"{val:,}"
 
+def fmt_power_delta(val):
+    """Like fmt_power but signed — for net gain/loss values that can be negative."""
+    if pd.isna(val):
+        return "0"
+    val = int(val)
+    return ("-" if val < 0 else "+") + fmt_power(abs(val))
+
 def render_tape(rows, label_a, label_b, header_a=None, header_b=None):
     """Build a boxing-style tale of the tape HTML table.
     rows: list of (label, raw_a, raw_b, fmt_a, fmt_b)
@@ -145,33 +152,42 @@ def categorize(migrate_power_series):
 NET_CATS = ["Elite", "Advanced", "Medium"]
 
 def net_category_table(df, from_col, to_col):
-    """Per-server net players gained/lost (joined - left) for each of NET_CATS.
-    Rows cover every server appearing on either side of the migration; sorted by
-    the magnitude of total net change (across NET_CATS), biggest turnover first."""
+    """Per-server net players gained/lost (joined - left) for each of NET_CATS, with the
+    net power moved shown alongside each count, plus a leading Net Total Power column
+    (net power across ALL players, not just NET_CATS). Rows cover every server appearing
+    on either side of the migration; sorted by the magnitude of total net player change
+    (across NET_CATS), biggest turnover first."""
     d = df.dropna(subset=[from_col, to_col]).copy()
     d[from_col] = d[from_col].astype(int)
     d[to_col]   = d[to_col].astype(int)
     d["_Category"] = categorize(d["Migrate Power"])
+    d["_Power"] = pd.to_numeric(d["Power"], errors="coerce").fillna(0)
 
     servers = sorted(set(d[from_col].unique()) | set(d[to_col].unique()))
 
     records = []
     for s in servers:
-        joined = d[(d[to_col] == s) & (d[from_col] != s)]["_Category"].value_counts()
-        left   = d[(d[from_col] == s) & (d[to_col] != s)]["_Category"].value_counts()
-        row = {"Server": s}
-        total_net = 0
+        joined_all = d[(d[to_col] == s) & (d[from_col] != s)]
+        left_all   = d[(d[from_col] == s) & (d[to_col] != s)]
+        total_net_power = joined_all["_Power"].sum() - left_all["_Power"].sum()
+
+        row = {"Server": s, "Net Total Power": fmt_power_delta(total_net_power)}
+        total_net_count = 0
         for c in NET_CATS:
-            net = int(joined.get(c, 0)) - int(left.get(c, 0))
-            row[f"Net {c}"] = net
-            total_net += net
-        row["_sort"] = abs(total_net)
+            j = joined_all[joined_all["_Category"] == c]
+            l = left_all[left_all["_Category"] == c]
+            net_count = len(j) - len(l)
+            net_power = j["_Power"].sum() - l["_Power"].sum()
+            row[f"Net {c}"] = f"{net_count:+d}  ({fmt_power_delta(net_power)})"
+            total_net_count += net_count
+        row["_sort"] = abs(total_net_count)
         records.append(row)
 
-    return (pd.DataFrame(records)
-            .sort_values("_sort", ascending=False)
-            .drop(columns="_sort")
-            .reset_index(drop=True))
+    out = (pd.DataFrame(records)
+           .sort_values("_sort", ascending=False)
+           .drop(columns="_sort")
+           .reset_index(drop=True))
+    return out[["Server", "Net Total Power"] + [f"Net {c}" for c in NET_CATS]]
 
 def category_summary(df):
     """Category, Count, Total Power table for a slice of players_df."""
@@ -588,7 +604,8 @@ with tab6:
                                                          ("S3 Server",   "Server")]):
         with otab:
             table = net_category_table(players_df, from_col, to_col)
-            st.dataframe(table, hide_index=True, width='stretch')
+            full_height = 38 + 35 * len(table) + 3  # header + one row per server, no inner scroll
+            st.dataframe(table, hide_index=True, width='stretch', height=full_height)
 
     # ── Per-server turnover detail ──────────────────────────────────────────────
     st.markdown("### Per-Server Detail")
