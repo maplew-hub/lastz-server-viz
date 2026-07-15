@@ -72,8 +72,9 @@ def render_tape_table(rows, label_a, label_b, header_a=None, header_b=None, mid_
         return [sa, "color:#888;", sb]
 
     styler = df.style.apply(_style, axis=1)
+    column_config = {c: st.column_config.Column(alignment="center") for c in df.columns}
     event = st.dataframe(
-        styler, hide_index=True, width="stretch",
+        styler, hide_index=True, width="stretch", column_config=column_config,
         on_select="rerun", selection_mode="single-cell", key=key,
     )
 
@@ -106,7 +107,8 @@ def render_drill(clicked, label_a, label_b):
         if col in disp.columns:
             disp[col] = pd.to_numeric(disp[col], errors="coerce").apply(fmt_power)
     disp = disp[display_cols].rename(columns={"Science": "Tech"})
-    st.dataframe(disp, hide_index=True, width="stretch")
+    column_config = {c: st.column_config.Column(alignment="center") for c in disp.columns}
+    st.dataframe(disp, hide_index=True, width="stretch", column_config=column_config)
     st.caption(f"{len(drill_df):,} players")
 
 @st.cache_data(ttl=60)
