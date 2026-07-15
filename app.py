@@ -31,59 +31,83 @@ def fmt_power_delta(val):
     val = int(val)
     return ("-" if val < 0 else "+") + fmt_power(abs(val))
 
-def render_tape(rows, label_a, label_b, header_a=None, header_b=None, mid_header="STAT"):
-    """Build a boxing-style tale of the tape HTML table.
-    rows: list of (label, raw_a, raw_b, fmt_a, fmt_b)
-    header_a/header_b: full header text override (default "Server {label}")
-    mid_header: text for the center column header (default "STAT")
+def render_tape_table(rows, label_a, label_b, header_a=None, header_b=None, mid_header="STAT", key=None):
+    """Interactive tale-of-tape table: an st.dataframe with single-cell selection so a
+    value can be clicked to drill into the players behind it. st.markdown can't make an
+    HTML table's cells clickable, so this replaces the old raw-HTML render_tape() —
+    trading its separate green delta badge for the delta folded into the winner's
+    colored text (e.g. "805.9M (+72.7M)").
+
+    rows: list of dicts with keys label, raw_a, raw_b, fmt_a, fmt_b, and optionally
+    drill_a/drill_b (a DataFrame of the players behind that value — omit or leave None
+    if there's no player-level detail for that figure, e.g. alliance-level stats).
+
+    Returns (row_dict, 'a'|'b') for the clicked cell, or None if nothing's selected.
     """
     header_a = header_a or f"Server {label_a}"
     header_b = header_b or f"Server {label_b}"
-    html = f"""<table style="width:100%;border-collapse:collapse;margin:8px 0;">
-    <thead><tr>
-        <th style="text-align:right;color:#e63946;padding:10px 20px;font-size:1.15em;width:35%;">
-            {header_a}</th>
-        <th style="text-align:center;color:#555;width:30%;font-weight:normal;font-size:0.85em;
-            border-left:1px solid #333;border-right:1px solid #333;">{mid_header}</th>
-        <th style="text-align:left;color:#4ecdc4;padding:10px 20px;font-size:1.15em;width:35%;">
-            {header_b}</th>
-    </tr></thead><tbody>"""
 
-    for label, raw_a, raw_b, fmt_a, fmt_b in rows:
+    win_flags = []
+    table_rows = []
+    for r in rows:
+        a_wins = None
         try:
-            a_num = float(raw_a)
-            b_num = float(raw_b)
-            if a_num == b_num:
-                a_wins = None
-            else:
+            a_num, b_num = float(r["raw_a"]), float(r["raw_b"])
+            if a_num != b_num:
                 a_wins = a_num > b_num
-            delta = fmt_power(abs(a_num - b_num)) if a_wins is not None else ""
-        except Exception:
-            a_wins = None
-            delta = ""
+        except (TypeError, ValueError):
+            a_num = b_num = None
+        delta = f" (+{fmt_power(abs(a_num - b_num))})" if a_wins is not None else ""
+        val_a = r["fmt_a"] + (delta if a_wins is True else "")
+        val_b = r["fmt_b"] + (delta if a_wins is False else "")
+        table_rows.append({header_a: val_a, mid_header: r["label"], header_b: val_b})
+        win_flags.append(a_wins)
 
-        delta_span = f" <span style='font-size:0.8em;color:#4caf50;'>(+{delta})</span>"
-        delta_a = delta_span if a_wins is True  else ""
-        delta_b = delta_span if a_wins is False else ""
+    df = pd.DataFrame(table_rows)
 
-        if a_wins is True:
-            sa = "font-weight:bold;font-size:1.05em;color:#e63946;"
-            sb = "color:#555;"
-        elif a_wins is False:
-            sa = "color:#555;"
-            sb = "font-weight:bold;font-size:1.05em;color:#4ecdc4;"
-        else:
-            sa = sb = "color:#aaa;"
+    def _style(row):
+        a_wins = win_flags[row.name]
+        sa = "color:#e63946;font-weight:bold;" if a_wins is True else ("color:#666;" if a_wins is False else "color:#aaa;")
+        sb = "color:#4ecdc4;font-weight:bold;" if a_wins is False else ("color:#666;" if a_wins is True else "color:#aaa;")
+        return [sa, "color:#888;", sb]
 
-        html += f"""<tr style="border-top:1px solid #2a2a2a;">
-            <td style="text-align:right;padding:10px 20px;{sa}">{fmt_a}{delta_a}</td>
-            <td style="text-align:center;padding:8px;color:#888;font-size:0.85em;
-                border-left:1px solid #333;border-right:1px solid #333;">{label}</td>
-            <td style="text-align:left;padding:10px 20px;{sb}">{fmt_b}{delta_b}</td>
-        </tr>"""
+    styler = df.style.apply(_style, axis=1)
+    event = st.dataframe(
+        styler, hide_index=True, width="stretch",
+        on_select="rerun", selection_mode="single-cell", key=key,
+    )
 
-    html += "</tbody></table>"
-    return html
+    cells = event.selection.cells if event and event.selection else []
+    if not cells:
+        return None
+    row_idx, col_name = cells[0]
+    side = "a" if col_name == header_a else ("b" if col_name == header_b else None)
+    if side is None:
+        return None
+    return (rows[row_idx], side)
+
+
+def render_drill(clicked, label_a, label_b):
+    """Show the player list behind a clicked tale-of-tape cell (see render_tape_table)."""
+    if not clicked:
+        return
+    row, side = clicked
+    drill_df = row.get(f"drill_{side}")
+    server_label = label_a if side == "a" else label_b
+    st.markdown(f"**{row['label']} — Server {server_label}**")
+    if drill_df is None or len(drill_df) == 0:
+        st.caption("No player-level detail available for this figure.")
+        return
+    disp = drill_df.sort_values("Power", ascending=False).copy()
+    display_cols = ["Name", "Tag", "Alliance", "HQ", "Power", "Max Power",
+                     "Migrate Power", "Science", "Tank", "Hero Power", "Last Seen"]
+    display_cols = [c for c in display_cols if c in disp.columns]
+    for col in ["Power", "Max Power", "Migrate Power", "Science", "Tank", "Hero Power"]:
+        if col in disp.columns:
+            disp[col] = pd.to_numeric(disp[col], errors="coerce").apply(fmt_power)
+    disp = disp[display_cols].rename(columns={"Science": "Tech"})
+    st.dataframe(disp, hide_index=True, width="stretch")
+    st.caption(f"{len(drill_df):,} players")
 
 @st.cache_data(ttl=60)
 def load_data_local():
@@ -620,41 +644,7 @@ with tab5:
     aa = alliances_df[alliances_df["Server"] == server_a].copy()
     ab = alliances_df[alliances_df["Server"] == server_b].copy()
 
-    # ── Section 1: Server Summary ─────────────────────────────────────────────
-    st.markdown("---")
-    st.markdown("#### Server Summary")
-
-    top10_al_a = aa.dropna(subset=["Rank"]).sort_values("Rank").head(10)
-    top10_al_b = ab.dropna(subset=["Rank"]).sort_values("Rank").head(10)
-    top10_tags_a = set(top10_al_a["Tag"].dropna())
-    top10_tags_b = set(top10_al_b["Tag"].dropna())
-
-    accts_top10_a = len(pa[pa["Tag"].isin(top10_tags_a)])
-    accts_top10_b = len(pb[pb["Tag"].isin(top10_tags_b)])
-    fp_top10_a  = top10_al_a["Fight Power"].sum()
-    fp_top10_b  = top10_al_b["Fight Power"].sum()
-    hero_a = len(pa[pd.to_numeric(pa["Hero Power"], errors="coerce") >= 100_000_000])
-    hero_b = len(pb[pd.to_numeric(pb["Hero Power"], errors="coerce") >= 100_000_000])
-    tech_a = len(pa[pd.to_numeric(pa["Science"],    errors="coerce") >= 25_000_000])
-    tech_b = len(pb[pd.to_numeric(pb["Science"],    errors="coerce") >= 25_000_000])
-    tank_a = len(pa[pd.to_numeric(pa["Tank"],       errors="coerce") >= 15_000_000])
-    tank_b = len(pb[pd.to_numeric(pb["Tank"],       errors="coerce") >= 15_000_000])
-    scanned_a = int(pa[pd.to_numeric(pa["Science"], errors="coerce").notna() |
-                       pd.to_numeric(pa["Tank"],    errors="coerce").notna()].shape[0])
-    scanned_b = int(pb[pd.to_numeric(pb["Science"], errors="coerce").notna() |
-                       pd.to_numeric(pb["Tank"],    errors="coerce").notna()].shape[0])
-
-    summary_rows = [
-        ("Players Scanned",                      scanned_a,    scanned_b,    str(scanned_a),           str(scanned_b)),
-        ("Accounts in Top 10 Alliances",         accts_top10_a, accts_top10_b, str(accts_top10_a),     str(accts_top10_b)),
-        ("Total Fight Power (Top 10 Alliances)", fp_top10_a,    fp_top10_b,    fmt_power(fp_top10_a),  fmt_power(fp_top10_b)),
-        ("Accounts with 100M+ Hero Power",       hero_a,        hero_b,        str(hero_a),            str(hero_b)),
-        ("Accounts with 25M+ Tech Power",        tech_a,        tech_b,        str(tech_a),            str(tech_b)),
-        ("Accounts with 15M+ Tank Power",        tank_a,        tank_b,        str(tank_a),            str(tank_b)),
-    ]
-    st.markdown(render_tape(summary_rows, server_a, server_b), unsafe_allow_html=True)
-
-    # ── Section 2: Category Breakdown ─────────────────────────────────────────
+    # ── Section 1: Category Breakdown ─────────────────────────────────────────
     st.markdown("---")
     st.markdown("#### Category Breakdown")
 
@@ -673,6 +663,8 @@ with tab5:
 
     cat_stats_a = _cat_stats(cat_a)
     cat_stats_b = _cat_stats(cat_b)
+    cat_drill_a = {cat: cat_a[cat_a["Category"] == cat] for cat in CAT_ORDER}
+    cat_drill_b = {cat: cat_b[cat_b["Category"] == cat] for cat in CAT_ORDER}
 
     CAT_METRICS = [
         ("Player Count",  "Count",         str),
@@ -680,15 +672,67 @@ with tab5:
         ("Average Power", "Average Power", fmt_power),
     ]
     cat_subtabs = st.tabs([label for label, _, _ in CAT_METRICS])
-    for subtab, (_, col, fmt_fn) in zip(cat_subtabs, CAT_METRICS):
+    for subtab, (metric_label, col, fmt_fn) in zip(cat_subtabs, CAT_METRICS):
         with subtab:
             cat_rows = []
             for cat in CAT_ORDER:
                 va = cat_stats_a.loc[cat, col]
                 vb = cat_stats_b.loc[cat, col]
-                cat_rows.append((CAT_LABELS[cat], va, vb, fmt_fn(va), fmt_fn(vb)))
-            st.markdown(render_tape(cat_rows, server_a, server_b, mid_header="Migrate Power"),
-                        unsafe_allow_html=True)
+                cat_rows.append({
+                    "label": CAT_LABELS[cat], "raw_a": va, "raw_b": vb,
+                    "fmt_a": fmt_fn(va), "fmt_b": fmt_fn(vb),
+                    "drill_a": cat_drill_a[cat], "drill_b": cat_drill_b[cat],
+                })
+            clicked = render_tape_table(cat_rows, server_a, server_b, mid_header="Migrate Power",
+                                         key=f"tape_cat_{col}")
+            render_drill(clicked, server_a, server_b)
+
+    # ── Section 2: Server Summary ─────────────────────────────────────────────
+    st.markdown("---")
+    st.markdown("#### Server Summary")
+
+    top10_al_a = aa.dropna(subset=["Rank"]).sort_values("Rank").head(10)
+    top10_al_b = ab.dropna(subset=["Rank"]).sort_values("Rank").head(10)
+    top10_tags_a = set(top10_al_a["Tag"].dropna())
+    top10_tags_b = set(top10_al_b["Tag"].dropna())
+
+    top10_players_a = pa[pa["Tag"].isin(top10_tags_a)]
+    top10_players_b = pb[pb["Tag"].isin(top10_tags_b)]
+    fp_top10_a  = top10_al_a["Fight Power"].sum()
+    fp_top10_b  = top10_al_b["Fight Power"].sum()
+    hero_mask_a = pd.to_numeric(pa["Hero Power"], errors="coerce") >= 100_000_000
+    hero_mask_b = pd.to_numeric(pb["Hero Power"], errors="coerce") >= 100_000_000
+    tech_mask_a = pd.to_numeric(pa["Science"],    errors="coerce") >= 25_000_000
+    tech_mask_b = pd.to_numeric(pb["Science"],    errors="coerce") >= 25_000_000
+    tank_mask_a = pd.to_numeric(pa["Tank"],       errors="coerce") >= 15_000_000
+    tank_mask_b = pd.to_numeric(pb["Tank"],       errors="coerce") >= 15_000_000
+    scanned_mask_a = (pd.to_numeric(pa["Science"], errors="coerce").notna() |
+                       pd.to_numeric(pa["Tank"],    errors="coerce").notna())
+    scanned_mask_b = (pd.to_numeric(pb["Science"], errors="coerce").notna() |
+                       pd.to_numeric(pb["Tank"],    errors="coerce").notna())
+
+    summary_rows = [
+        {"label": "Players Scanned", "raw_a": scanned_mask_a.sum(), "raw_b": scanned_mask_b.sum(),
+         "fmt_a": str(scanned_mask_a.sum()), "fmt_b": str(scanned_mask_b.sum()),
+         "drill_a": pa[scanned_mask_a], "drill_b": pb[scanned_mask_b]},
+        {"label": "Accounts in Top 10 Alliances", "raw_a": len(top10_players_a), "raw_b": len(top10_players_b),
+         "fmt_a": str(len(top10_players_a)), "fmt_b": str(len(top10_players_b)),
+         "drill_a": top10_players_a, "drill_b": top10_players_b},
+        {"label": "Total Fight Power (Top 10 Alliances)", "raw_a": fp_top10_a, "raw_b": fp_top10_b,
+         "fmt_a": fmt_power(fp_top10_a), "fmt_b": fmt_power(fp_top10_b),
+         "drill_a": top10_players_a, "drill_b": top10_players_b},
+        {"label": "Accounts with 100M+ Hero Power", "raw_a": hero_mask_a.sum(), "raw_b": hero_mask_b.sum(),
+         "fmt_a": str(hero_mask_a.sum()), "fmt_b": str(hero_mask_b.sum()),
+         "drill_a": pa[hero_mask_a], "drill_b": pb[hero_mask_b]},
+        {"label": "Accounts with 25M+ Tech Power", "raw_a": tech_mask_a.sum(), "raw_b": tech_mask_b.sum(),
+         "fmt_a": str(tech_mask_a.sum()), "fmt_b": str(tech_mask_b.sum()),
+         "drill_a": pa[tech_mask_a], "drill_b": pb[tech_mask_b]},
+        {"label": "Accounts with 15M+ Tank Power", "raw_a": tank_mask_a.sum(), "raw_b": tank_mask_b.sum(),
+         "fmt_a": str(tank_mask_a.sum()), "fmt_b": str(tank_mask_b.sum()),
+         "drill_a": pa[tank_mask_a], "drill_b": pb[tank_mask_b]},
+    ]
+    clicked = render_tape_table(summary_rows, server_a, server_b, key="tape_summary")
+    render_drill(clicked, server_a, server_b)
 
     # ── Section 3: Migration Score Comparison ─────────────────────────────────
     st.markdown("---")
@@ -701,12 +745,17 @@ with tab5:
 
     mig_rows = []
     for n in MIGRATE_TIERS:
-        sum_a = sorted_mig_a.head(n)["Migrate Power"].sum()
-        sum_b = sorted_mig_b.head(n)["Migrate Power"].sum()
-        mig_rows.append((f"Top {n}", sum_a, sum_b, fmt_power(sum_a), fmt_power(sum_b)))
+        top_a = sorted_mig_a.head(n)
+        top_b = sorted_mig_b.head(n)
+        sum_a = top_a["Migrate Power"].sum()
+        sum_b = top_b["Migrate Power"].sum()
+        mig_rows.append({"label": f"Top {n}", "raw_a": sum_a, "raw_b": sum_b,
+                          "fmt_a": fmt_power(sum_a), "fmt_b": fmt_power(sum_b),
+                          "drill_a": top_a, "drill_b": top_b})
 
-    st.markdown(render_tape(mig_rows, server_a, server_b, mid_header="Migrate Power"),
-                unsafe_allow_html=True)
+    clicked = render_tape_table(mig_rows, server_a, server_b, mid_header="Migrate Power",
+                                 key="tape_migscore")
+    render_drill(clicked, server_a, server_b)
 
     # ── Section 4: Max Power Breakdown ───────────────────────────────────────
     st.markdown("---")
@@ -717,12 +766,15 @@ with tab5:
 
     mp_rows = []
     for threshold in [700_000_000, 600_000_000, 500_000_000, 400_000_000, 300_000_000, 200_000_000]:
-        cnt_a = int((mp_a >= threshold).sum())
-        cnt_b = int((mp_b >= threshold).sum())
+        mask_a = mp_a >= threshold
+        mask_b = mp_b >= threshold
         label = f"Over {fmt_power(threshold)}"
-        mp_rows.append((label, cnt_a, cnt_b, str(cnt_a), str(cnt_b)))
+        mp_rows.append({"label": label, "raw_a": mask_a.sum(), "raw_b": mask_b.sum(),
+                         "fmt_a": str(mask_a.sum()), "fmt_b": str(mask_b.sum()),
+                         "drill_a": pa[mask_a], "drill_b": pb[mask_b]})
 
-    st.markdown(render_tape(mp_rows, server_a, server_b), unsafe_allow_html=True)
+    clicked = render_tape_table(mp_rows, server_a, server_b, key="tape_maxpower")
+    render_drill(clicked, server_a, server_b)
 
     # ── Section 5: Power Breakdown by Tier ───────────────────────────────────
     st.markdown("---")
@@ -746,11 +798,16 @@ with tab5:
 
             tier_rows = []
             for n in TIERS:
-                sum_a = sorted_a.head(n)[col].sum()
-                sum_b = sorted_b.head(n)[col].sum()
-                tier_rows.append((f"Top {n}", sum_a, sum_b, fmt_power(sum_a), fmt_power(sum_b)))
+                top_a = sorted_a.head(n)
+                top_b = sorted_b.head(n)
+                sum_a = top_a[col].sum()
+                sum_b = top_b[col].sum()
+                tier_rows.append({"label": f"Top {n}", "raw_a": sum_a, "raw_b": sum_b,
+                                   "fmt_a": fmt_power(sum_a), "fmt_b": fmt_power(sum_b),
+                                   "drill_a": top_a, "drill_b": top_b})
 
-            st.markdown(render_tape(tier_rows, server_a, server_b), unsafe_allow_html=True)
+            clicked = render_tape_table(tier_rows, server_a, server_b, key=f"tape_tier_{col}")
+            render_drill(clicked, server_a, server_b)
 
 
 # ── Tab 6: Migration Turnover ─────────────────────────────────────────────────
