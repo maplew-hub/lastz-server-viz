@@ -31,10 +31,11 @@ def fmt_power_delta(val):
     val = int(val)
     return ("-" if val < 0 else "+") + fmt_power(abs(val))
 
-def render_tape(rows, label_a, label_b, header_a=None, header_b=None):
+def render_tape(rows, label_a, label_b, header_a=None, header_b=None, mid_header="STAT"):
     """Build a boxing-style tale of the tape HTML table.
     rows: list of (label, raw_a, raw_b, fmt_a, fmt_b)
     header_a/header_b: full header text override (default "Server {label}")
+    mid_header: text for the center column header (default "STAT")
     """
     header_a = header_a or f"Server {label_a}"
     header_b = header_b or f"Server {label_b}"
@@ -43,7 +44,7 @@ def render_tape(rows, label_a, label_b, header_a=None, header_b=None):
         <th style="text-align:right;color:#e63946;padding:10px 20px;font-size:1.15em;width:35%;">
             {header_a}</th>
         <th style="text-align:center;color:#555;width:30%;font-weight:normal;font-size:0.85em;
-            border-left:1px solid #333;border-right:1px solid #333;">STAT</th>
+            border-left:1px solid #333;border-right:1px solid #333;">{mid_header}</th>
         <th style="text-align:left;color:#4ecdc4;padding:10px 20px;font-size:1.15em;width:35%;">
             {header_b}</th>
     </tr></thead><tbody>"""
@@ -656,7 +657,8 @@ with tab5:
                 va = cat_stats_a.loc[cat, col]
                 vb = cat_stats_b.loc[cat, col]
                 cat_rows.append((CAT_LABELS[cat], va, vb, fmt_fn(va), fmt_fn(vb)))
-            st.markdown(render_tape(cat_rows, server_a, server_b), unsafe_allow_html=True)
+            st.markdown(render_tape(cat_rows, server_a, server_b, mid_header="Migrate Power"),
+                        unsafe_allow_html=True)
 
     # ── Section 3: Max Power Breakdown ───────────────────────────────────────
     st.markdown("---")
