@@ -1,9 +1,11 @@
 import os
+import json
 import sqlite3
 import streamlit as st
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
+from streamlit_local_storage import LocalStorage
 
 st.set_page_config(page_title="Last Z — Server Intel", layout="wide", page_icon="⚔️")
 
@@ -275,16 +277,42 @@ except Exception as e:
     st.error(f"Failed to load data: {e}")
     st.stop()
 
+# ── Browser-local persistence (remembers last selection across visits) ────────
+# Stored in the browser's localStorage (via streamlit-local-storage), not on the
+# server — so it works the same for local dev and the deployed Cloud site, and is
+# private to whoever's browser made the selection.
+
+local_storage = LocalStorage()
+
+def _ls_get_json(key, default=None):
+    raw = local_storage.getItem(key)
+    if raw is None:
+        return default
+    try:
+        return json.loads(raw)
+    except (TypeError, ValueError):
+        return default
+
+def _ls_set_json(key, value, widget_key):
+    local_storage.setItem(key, json.dumps(value), key=widget_key)
+
 # ── Sidebar filters ───────────────────────────────────────────────────────────
 
 st.sidebar.header("Filters")
 
 all_servers = sorted(players_df["Server"].dropna().astype(float).astype(int).unique().tolist())
 DEFAULT_SERVERS = [231, 235, 241, 249]
+
+stored_selected_servers = _ls_get_json("selected_servers")
+default_selected_servers = [s for s in (stored_selected_servers or []) if s in all_servers]
+if not default_selected_servers:
+    default_selected_servers = [s for s in DEFAULT_SERVERS if s in all_servers]
+
 selected_servers = st.sidebar.multiselect(
     "Servers to compare", all_servers,
-    default=[s for s in DEFAULT_SERVERS if s in all_servers]
+    default=default_selected_servers,
 )
+_ls_set_json("selected_servers", selected_servers, "ls_set_selected_servers")
 
 top_n = st.sidebar.select_slider(
     "Top N players per server",
@@ -536,6 +564,13 @@ with tab5:
     default_a = 241 if 241 in all_servers else (tape_defaults[0] if tape_defaults else all_servers[0])
     default_b = 249 if 249 in all_servers else (tape_defaults[1] if len(tape_defaults) > 1 else (all_servers[1] if len(all_servers) > 1 else all_servers[0]))
 
+    stored_a = _ls_get_json("tape_server_a")
+    stored_b = _ls_get_json("tape_server_b")
+    if stored_a in all_servers:
+        default_a = stored_a
+    if stored_b in all_servers:
+        default_b = stored_b
+
     col_l, col_mid, col_r = st.columns([5, 1, 5])
     server_a = col_l.selectbox("Left Server", all_servers,
                                 index=all_servers.index(default_a),
@@ -545,6 +580,8 @@ with tab5:
     server_b = col_r.selectbox("Right Server", all_servers,
                                 index=all_servers.index(default_b),
                                 key="tape_b")
+    _ls_set_json("tape_server_a", server_a, "ls_set_tape_a")
+    _ls_set_json("tape_server_b", server_b, "ls_set_tape_b")
 
     if server_a == server_b:
         st.warning("Select two different servers to compare.")
