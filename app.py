@@ -649,7 +649,51 @@ with tab5:
     aa = alliances_df[alliances_df["Server"] == server_a].copy()
     ab = alliances_df[alliances_df["Server"] == server_b].copy()
 
-    # ── Section 1: Category Breakdown ─────────────────────────────────────────
+    # ── Section 1: Scan Freshness ─────────────────────────────────────────────
+    st.markdown("---")
+    st.markdown("#### Scan Freshness")
+
+    STALE_CUTOFF_DAYS = 7
+    now = pd.Timestamp.now()
+
+    def _freshness_masks(df):
+        scanned = pd.to_numeric(df["Science"], errors="coerce").notna() | \
+                  pd.to_numeric(df["Tank"], errors="coerce").notna()
+        # Last Seen has a mix of "YYYY-MM-DD" and "YYYY-MM-DDTHH:MM:SS" strings in the DB.
+        # Plain pd.to_datetime infers ONE format from a sample of rows and silently NaTs
+        # every row that doesn't match it — which format wins depends on row order, so
+        # this bug is nondeterministic across queries. format="mixed" parses each value
+        # independently instead, avoiding that entirely.
+        last_seen = pd.to_datetime(df["Last Seen"], errors="coerce", format="mixed")
+        age_days = (now - last_seen).dt.days
+        fresh = scanned & (age_days <= STALE_CUTOFF_DAYS)
+        # Treat a scanned player with an unparseable/missing Last Seen as stale rather
+        # than silently dropping them from both buckets — we can't confirm freshness,
+        # so the cautious read is "not known fresh."
+        stale = scanned & ((age_days > STALE_CUTOFF_DAYS) | age_days.isna())
+        unscanned = ~scanned
+        return fresh, stale, unscanned
+
+    fresh_a, stale_a, unscanned_a = _freshness_masks(pa)
+    fresh_b, stale_b, unscanned_b = _freshness_masks(pb)
+
+    def _pct_row(label, mask_a, mask_b, drill_a, drill_b):
+        cnt_a, cnt_b = int(mask_a.sum()), int(mask_b.sum())
+        pct_a = cnt_a / len(pa) * 100 if len(pa) else 0
+        pct_b = cnt_b / len(pb) * 100 if len(pb) else 0
+        return {"label": label, "raw_a": cnt_a, "raw_b": cnt_b,
+                "fmt_a": f"{cnt_a} ({pct_a:.0f}%)", "fmt_b": f"{cnt_b} ({pct_b:.0f}%)",
+                "drill_a": drill_a, "drill_b": drill_b}
+
+    freshness_rows = [
+        _pct_row(f"Scanned (Last {STALE_CUTOFF_DAYS} Days)", fresh_a, fresh_b, pa[fresh_a], pb[fresh_b]),
+        _pct_row(f"Stale ({STALE_CUTOFF_DAYS}+ Days)", stale_a, stale_b, pa[stale_a], pb[stale_b]),
+        _pct_row("Unscanned", unscanned_a, unscanned_b, pa[unscanned_a], pb[unscanned_b]),
+    ]
+    clicked = render_tape_table(freshness_rows, server_a, server_b, key="tape_freshness")
+    render_drill(clicked, server_a, server_b)
+
+    # ── Section 2: Category Breakdown ─────────────────────────────────────────
     st.markdown("---")
     st.markdown("#### Category Breakdown")
 
@@ -692,7 +736,7 @@ with tab5:
                                          key=f"tape_cat_{col}")
             render_drill(clicked, server_a, server_b)
 
-    # ── Section 2: Server Summary ─────────────────────────────────────────────
+    # ── Section 3: Server Summary ─────────────────────────────────────────────
     st.markdown("---")
     st.markdown("#### Server Summary")
 
@@ -739,7 +783,7 @@ with tab5:
     clicked = render_tape_table(summary_rows, server_a, server_b, key="tape_summary")
     render_drill(clicked, server_a, server_b)
 
-    # ── Section 3: Migration Score Comparison ─────────────────────────────────
+    # ── Section 4: Migration Score Comparison ─────────────────────────────────
     st.markdown("---")
     st.markdown("#### Migration Score Comparison")
 
@@ -762,7 +806,7 @@ with tab5:
                                  key="tape_migscore")
     render_drill(clicked, server_a, server_b)
 
-    # ── Section 4: Max Power Breakdown ───────────────────────────────────────
+    # ── Section 5: Max Power Breakdown ───────────────────────────────────────
     st.markdown("---")
     st.markdown("#### Max Power Breakdown")
 
@@ -781,7 +825,7 @@ with tab5:
     clicked = render_tape_table(mp_rows, server_a, server_b, key="tape_maxpower")
     render_drill(clicked, server_a, server_b)
 
-    # ── Section 5: Power Breakdown by Tier ───────────────────────────────────
+    # ── Section 6: Power Breakdown by Tier ───────────────────────────────────
     st.markdown("---")
     st.markdown("#### Power Breakdown by Tier")
 
