@@ -690,7 +690,25 @@ with tab5:
             st.markdown(render_tape(cat_rows, server_a, server_b, mid_header="Migrate Power"),
                         unsafe_allow_html=True)
 
-    # ── Section 3: Max Power Breakdown ───────────────────────────────────────
+    # ── Section 3: Migration Score Comparison ─────────────────────────────────
+    st.markdown("---")
+    st.markdown("#### Migration Score Comparison")
+
+    MIGRATE_TIERS = [3, 5, 10, 20, 30]
+
+    sorted_mig_a = pa.dropna(subset=["Migrate Power"]).sort_values("Migrate Power", ascending=False)
+    sorted_mig_b = pb.dropna(subset=["Migrate Power"]).sort_values("Migrate Power", ascending=False)
+
+    mig_rows = []
+    for n in MIGRATE_TIERS:
+        sum_a = sorted_mig_a.head(n)["Migrate Power"].sum()
+        sum_b = sorted_mig_b.head(n)["Migrate Power"].sum()
+        mig_rows.append((f"Top {n}", sum_a, sum_b, fmt_power(sum_a), fmt_power(sum_b)))
+
+    st.markdown(render_tape(mig_rows, server_a, server_b, mid_header="Migrate Power"),
+                unsafe_allow_html=True)
+
+    # ── Section 4: Max Power Breakdown ───────────────────────────────────────
     st.markdown("---")
     st.markdown("#### Max Power Breakdown")
 
@@ -706,7 +724,7 @@ with tab5:
 
     st.markdown(render_tape(mp_rows, server_a, server_b), unsafe_allow_html=True)
 
-    # ── Section 4: Power Breakdown by Tier ───────────────────────────────────
+    # ── Section 5: Power Breakdown by Tier ───────────────────────────────────
     st.markdown("---")
     st.markdown("#### Power Breakdown by Tier")
 
