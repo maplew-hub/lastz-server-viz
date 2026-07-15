@@ -299,7 +299,7 @@ def _ls_set_json(key, value, widget_key):
 st.sidebar.header("Filters")
 
 all_servers = sorted(players_df["Server"].dropna().astype(float).astype(int).unique().tolist())
-DEFAULT_SERVERS = [231, 235, 241, 249]
+DEFAULT_SERVERS = [241, 225]  # temporary default pair, requested 2026-07-14
 
 stored_selected_servers = _ls_get_json("selected_servers")
 default_selected_servers = [s for s in (stored_selected_servers or []) if s in all_servers]
@@ -560,7 +560,7 @@ with tab5:
 
     tape_defaults = [s for s in DEFAULT_SERVERS if s in all_servers]
     default_a = 241 if 241 in all_servers else (tape_defaults[0] if tape_defaults else all_servers[0])
-    default_b = 249 if 249 in all_servers else (tape_defaults[1] if len(tape_defaults) > 1 else (all_servers[1] if len(all_servers) > 1 else all_servers[0]))
+    default_b = 225 if 225 in all_servers else (tape_defaults[1] if len(tape_defaults) > 1 else (all_servers[1] if len(all_servers) > 1 else all_servers[0]))
 
     stored_a = _ls_get_json("tape_server_a")
     stored_b = _ls_get_json("tape_server_b")
