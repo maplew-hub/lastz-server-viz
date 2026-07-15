@@ -592,17 +592,20 @@ with tab4:
     if al_filter:
         tbl = tbl[tbl["Tag"].str.contains(al_filter, case=False, na=False)]
 
-    for col in ["Power", "Max Power", "Migrate Power", "Hero Power", "Building", "Science", "Troop", "Tank"]:
-        if col in tbl.columns:
-            tbl[col] = tbl[col].apply(fmt_power)
-
     display_cols = ["Server", "Name", "Tag", "Alliance", "HQ",
                     "Max Power", "Power", "Migrate Power", "Last Seen"]
     display_cols = [c for c in display_cols if c in tbl.columns]
 
+    # Keep numeric columns numeric (don't pre-format to strings like "530M") so
+    # st.dataframe's column-header sort is numeric, not alphabetic — same fix as the
+    # Migration Turnover table. column_config handles the compact display formatting.
+    numeric_cols = ["Power", "Max Power", "Migrate Power", "Hero Power", "Building", "Science", "Troop", "Tank"]
+    column_config = {c: st.column_config.NumberColumn(format="compact")
+                      for c in numeric_cols if c in display_cols}
+
     st.dataframe(
         tbl[display_cols].sort_values(["Server", "Max Power"], ascending=[True, False]),
-        width='stretch', hide_index=True
+        width='stretch', hide_index=True, column_config=column_config,
     )
     st.caption(f"{len(tbl):,} players shown")
 
