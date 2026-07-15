@@ -141,6 +141,16 @@ def _coerce_numeric(df, cols):
 
 CAT_ORDER = ["Super Elite", "Elite", "High Advanced", "Low Advanced", "Medium", "Regular", "Unscanned"]
 
+CAT_LABELS = {
+    "Super Elite":   "Super Elite (300M+)",
+    "Elite":         "Elite (160M–300M)",
+    "High Advanced": "High Advanced (120M–160M)",
+    "Low Advanced":  "Low Advanced (80M–120M)",
+    "Medium":        "Medium (40M–80M)",
+    "Regular":       "Regular (≤40M)",
+    "Unscanned":     "Unscanned",
+}
+
 def categorize(migrate_power_series):
     """Super Elite >300M, Elite >160M, High Advanced >120M, Low Advanced >80M,
     Medium >40M, Regular (scanned, <=40M), Unscanned (no migrate power)."""
@@ -645,7 +655,7 @@ with tab5:
             for cat in CAT_ORDER:
                 va = cat_stats_a.loc[cat, col]
                 vb = cat_stats_b.loc[cat, col]
-                cat_rows.append((cat, va, vb, fmt_fn(va), fmt_fn(vb)))
+                cat_rows.append((CAT_LABELS[cat], va, vb, fmt_fn(va), fmt_fn(vb)))
             st.markdown(render_tape(cat_rows, server_a, server_b), unsafe_allow_html=True)
 
     # ── Section 3: Max Power Breakdown ───────────────────────────────────────
