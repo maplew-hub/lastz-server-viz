@@ -266,11 +266,41 @@ def prepare(players_df, alliances_df):
 
 # ── Header ────────────────────────────────────────────────────────────────────
 
-st.title("⚔️ Last Z — Server Intel")
+GANDALF_NAME = "gandalfdabae"
+
+title_col, gandalf_col = st.columns([5, 1])
+with title_col:
+    st.title("⚔️ Last Z — Server Intel")
+with gandalf_col:
+    st.markdown("<div style='height:10px;'></div>", unsafe_allow_html=True)
+    st.caption("Can Gandalf play?")
+
+    # Defaults to No (excluded) — he often can't make SvS because of work, so that's
+    # the working assumption; flip to Yes to put him back in the numbers.
+    if "gandalf_yes" not in st.session_state:
+        st.session_state.gandalf_yes = False
+        st.session_state.gandalf_no = True
+
+    # Two independent checkboxes that behave like a single Yes/No toggle: checking
+    # one always unchecks the other, and unchecking one without checking the other
+    # auto-checks it back — so exactly one is selected at all times.
+    def _gandalf_yes_changed():
+        st.session_state.gandalf_no = not st.session_state.gandalf_yes
+
+    def _gandalf_no_changed():
+        st.session_state.gandalf_yes = not st.session_state.gandalf_no
+
+    gy_col, gn_col = st.columns(2)
+    gy_col.checkbox("Yes", key="gandalf_yes", on_change=_gandalf_yes_changed)
+    gn_col.checkbox("No", key="gandalf_no", on_change=_gandalf_no_changed)
+
+exclude_gandalf = st.session_state.gandalf_no
 
 try:
     players_df, alliances_df = load_data()
     players_df, alliances_df = prepare(players_df, alliances_df)
+    if exclude_gandalf:
+        players_df = players_df[players_df["Name"].str.lower() != GANDALF_NAME].copy()
 except Exception as e:
     st.error(f"Failed to load data: {e}")
     st.stop()
