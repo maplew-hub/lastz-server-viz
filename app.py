@@ -137,19 +137,35 @@ def _coerce_numeric(df, cols):
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce")
 
-CAT_ORDER = ["Elite", "Advanced", "Medium", "Regular", "Unscanned"]
+CAT_ORDER = ["Super Elite", "Elite", "High Advanced", "Low Advanced", "Medium", "Regular", "Unscanned"]
 
 def categorize(migrate_power_series):
-    """Elite >160M, Advanced >80M, Medium >40M, Regular (scanned, <=40M), Unscanned (no migrate power)."""
+    """Super Elite >300M, Elite >160M, High Advanced >120M, Low Advanced >80M,
+    Medium >40M, Regular (scanned, <=40M), Unscanned (no migrate power)."""
     mp = pd.to_numeric(migrate_power_series, errors="coerce")
     cat = pd.Series("Unscanned", index=migrate_power_series.index)
-    cat[mp.notna()]      = "Regular"
+    cat[mp.notna()]       = "Regular"
     cat[mp > 40_000_000]  = "Medium"
-    cat[mp > 80_000_000]  = "Advanced"
+    cat[mp > 80_000_000]  = "Low Advanced"
+    cat[mp > 120_000_000] = "High Advanced"
     cat[mp > 160_000_000] = "Elite"
+    cat[mp > 300_000_000] = "Super Elite"
     return cat
 
-NET_CATS = ["Elite", "Advanced", "Medium"]
+# Ordinal ramp (validated via dataviz skill's validate_palette.js --ordinal, dark surface
+# #1a1a19): one hue, ascending lightness = ascending tier. Unscanned isn't a power tier
+# (it's a "no data" state), so it gets neutral gray instead of a ramp step.
+CAT_COLORS = {
+    "Unscanned":     "#898781",
+    "Regular":       "#184f95",
+    "Medium":        "#256abf",
+    "Low Advanced":  "#3987e5",
+    "High Advanced": "#6da7ec",
+    "Elite":         "#9ec5f4",
+    "Super Elite":   "#cde2fb",
+}
+
+NET_CATS = ["Super Elite", "Elite", "High Advanced", "Low Advanced", "Medium"]
 
 def net_category_table(df, from_col, to_col):
     """Per-server net players gained/lost (joined - left) for each of NET_CATS, with the
@@ -616,6 +632,76 @@ with tab5:
                 tier_rows.append((f"Top {n}", sum_a, sum_b, fmt_power(sum_a), fmt_power(sum_b)))
 
             st.markdown(render_tape(tier_rows, server_a, server_b), unsafe_allow_html=True)
+
+    # ── Section 4: Category Lineup by Server ──────────────────────────────────
+    st.markdown("---")
+    st.markdown("#### Category Lineup by Server")
+    st.caption("Every server's players bucketed by Migrate Power tier. Switch what the bar "
+               "height shows — Count, Total Power, and Average Power are all in the hover.")
+
+    lineup_metric = st.radio(
+        "Bar height shows",
+        ["Player Count", "Total Power", "Average Power"],
+        horizontal=True, key="lineup_metric",
+    )
+
+    lineup_df = players_df.dropna(subset=["Server"]).copy()
+    lineup_df["Server"] = lineup_df["Server"].astype(float).astype(int).astype(str)
+    lineup_df["Category"] = categorize(lineup_df["Migrate Power"])
+    lineup_df["_Power"] = pd.to_numeric(lineup_df["Power"], errors="coerce").fillna(0)
+
+    lineup_order = [str(s) for s in all_servers]
+    grid = pd.MultiIndex.from_product([lineup_order, CAT_ORDER], names=["Server", "Category"])
+    lineup = (
+        lineup_df.groupby(["Server", "Category"])
+        .agg(Count=("_Power", "size"), **{"Total Power": ("_Power", "sum")})
+        .reindex(grid, fill_value=0)
+        .reset_index()
+    )
+    lineup["Average Power"] = (lineup["Total Power"] / lineup["Count"]).fillna(0)
+
+    y_col = {"Player Count": "Count", "Total Power": "Total Power",
+              "Average Power": "Average Power"}[lineup_metric]
+    stack_order = list(reversed(CAT_ORDER))  # Unscanned at the bottom, Super Elite on top
+
+    # Count and Total Power are additive across categories, so a stack reads as a
+    # meaningful whole. Average Power is not additive — stacking averages would sum
+    # to a number with no real meaning — so that view uses grouped bars instead.
+    is_avg = lineup_metric == "Average Power"
+    plot_df = lineup[lineup["Count"] > 0] if is_avg else lineup
+
+    fig4 = px.bar(
+        plot_df, x="Server", y=y_col, color="Category",
+        category_orders={"Server": lineup_order, "Category": stack_order},
+        color_discrete_map=CAT_COLORS,
+        custom_data=["Category", "Count", "Total Power", "Average Power"],
+    )
+    fig4.update_traces(
+        hovertemplate="<b>%{customdata[0]}</b> — Server %{x}<br>"
+                      "Count: %{customdata[1]:,}<br>"
+                      "Total Power: %{customdata[2]:,.0f}<br>"
+                      "Avg Power: %{customdata[3]:,.0f}<extra></extra>"
+    )
+    fig4.update_layout(
+        barmode="group" if is_avg else "stack",
+        xaxis_type="category",
+        yaxis_title=lineup_metric,
+        xaxis_title="Server",
+        legend_title_text="Category",
+        plot_bgcolor="rgba(0,0,0,0)",
+        paper_bgcolor="rgba(0,0,0,0)",
+    )
+    st.plotly_chart(fig4, width='stretch')
+
+    with st.expander("Show data table"):
+        table4 = lineup.sort_values(["Server", "Category"]).copy()
+        st.dataframe(
+            table4, hide_index=True, width='stretch',
+            column_config={
+                "Total Power": st.column_config.NumberColumn(format="compact"),
+                "Average Power": st.column_config.NumberColumn(format="compact"),
+            },
+        )
 
 
 # ── Tab 6: Migration Turnover ─────────────────────────────────────────────────
