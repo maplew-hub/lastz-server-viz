@@ -12,6 +12,11 @@ st.set_page_config(page_title="Last Z — Server Intel", layout="wide", page_ico
 LOCAL_DB = os.path.expanduser("~/lastz-tools/data/players.db")
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets.readonly"]
 
+# Player Table's unfiltered view can exceed pandas Styler's default 262,144-cell cap
+# (tens of thousands of players x a dozen-plus columns) — raise it so the Scan Age
+# color-coding doesn't error out when no server filter narrows the row count.
+pd.set_option("styler.render.max_elements", 5_000_000)
+
 def fmt_power(val):
     if pd.isna(val):
         return "—"
@@ -30,6 +35,26 @@ def fmt_power_delta(val):
         return "0"
     val = int(val)
     return ("-" if val < 0 else "+") + fmt_power(abs(val))
+
+def parse_last_seen(series):
+    """Last Seen has a mix of "YYYY-MM-DD" and "YYYY-MM-DDTHH:MM:SS" strings in the DB.
+    Plain pd.to_datetime infers ONE format from a sample of rows and silently NaTs every
+    row that doesn't match it — format="mixed" parses each value independently instead."""
+    return pd.to_datetime(series, errors="coerce", format="mixed")
+
+# Server ranges shown as a "Range" label throughout the app. Mirrors
+# ~/lastz-tools/instances.json's "My Servers"/"S5 Migration" entries (Friend Servers is
+# intentionally excluded — that range never flows into the "All Players" data source).
+SERVER_RANGES = [("My Servers", 225, 256), ("S5 Migration", 193, 224)]
+
+def server_range_label(server_num):
+    if pd.isna(server_num):
+        return "Other"
+    n = int(server_num)
+    for label, lo, hi in SERVER_RANGES:
+        if lo <= n <= hi:
+            return label
+    return "Other"
 
 def render_tape_table(rows, label_a, label_b, header_a=None, header_b=None, mid_header="STAT", key=None):
     """Interactive tale-of-tape table: an st.dataframe with single-cell selection so a
@@ -115,15 +140,17 @@ def render_drill(clicked, label_a, label_b):
 def load_data_local():
     con = sqlite3.connect(LOCAL_DB)
     players_df = pd.read_sql_query("""
-        SELECT name AS Name, alliance_abbr AS Tag, alliance_name AS Alliance,
-               hq_level AS HQ, server AS Server,
-               original_server AS [Orig Server], s3_server AS [S3 Server],
-               power AS Power,
-               migrate_power AS [Migrate Power], hero_power AS [Hero Power],
-               building_power AS Building, science_power AS Science,
-               army_power AS Troop, tank_power AS Tank,
-               player_max_power AS [Max Power], last_seen AS [Last Seen]
-        FROM players ORDER BY power DESC
+        SELECT p.name AS Name, p.alliance_abbr AS Tag, p.alliance_name AS Alliance,
+               p.hq_level AS HQ, p.server AS Server,
+               p.original_server AS [Orig Server], p.s3_server AS [S3 Server],
+               p.power AS Power,
+               p.migrate_power AS [Migrate Power], p.hero_power AS [Hero Power],
+               p.building_power AS Building, p.science_power AS Science,
+               p.army_power AS Troop, p.tank_power AS Tank,
+               p.player_max_power AS [Max Power], p.last_seen AS [Last Seen],
+               COALESCE(p.candidate, 0) AS Candidate, pk.name AS Package
+        FROM players p LEFT JOIN packages pk ON pk.package_id = p.package_id
+        ORDER BY p.power DESC
     """, con)
     alliances_df = pd.read_sql_query("""
         SELECT a.name AS Alliance, a.abbr AS Tag, a.server AS Server,
@@ -269,6 +296,14 @@ CATEGORY_SUMMARY_COLUMN_CONFIG = {
     "Total Power": st.column_config.NumberColumn(format="compact"),
 }
 
+STALE_CUTOFF_DAYS = 7
+STALE_CUTOFF_DAYS_RED = 14
+
+def _coerce_bool_flag(series):
+    """Candidate comes back as an int (0/1) from local SQLite and as '✓'/'' text from
+    the Sheets sync (see migrate_scout.py's _PLAYER_COLS) — normalize both to bool."""
+    return series.apply(lambda v: str(v).strip().lower() in ("✓", "1", "1.0", "true", "yes"))
+
 def _coerce_str(df, cols):
     """Force text columns to str. Sheets mode infers cell types per-value, so a
     purely-numeric name/tag (e.g. a player named "12345") comes back as a Python
@@ -287,6 +322,18 @@ def prepare(players_df, alliances_df):
                                   "Orig Server", "S3 Server"])
     _coerce_numeric(alliances_df, ["Fight Power", "Server", "Rank", "Members",
                                     "Max Members", "Players in DB", "With Migrate"])
+    if "Candidate" in players_df.columns:
+        players_df["Candidate"] = _coerce_bool_flag(players_df["Candidate"])
+    else:
+        players_df["Candidate"] = False
+    if "Package" in players_df.columns:
+        players_df["Package"] = players_df["Package"].fillna("").astype(str).replace("nan", "")
+    else:
+        players_df["Package"] = ""
+    if "Server" in players_df.columns:
+        players_df["Range"] = players_df["Server"].apply(server_range_label)
+    if "Last Seen" in players_df.columns:
+        players_df["Scan Age (Days)"] = (pd.Timestamp.now() - parse_last_seen(players_df["Last Seen"])).dt.days
     return players_df, alliances_df
 
 
@@ -580,22 +627,55 @@ with tab3:
 
 with tab4:
     st.subheader("Player Search")
+    st.caption("Independent of the sidebar filters — searches every player across all "
+               "server ranges (My Servers + S5 Migration), no Top N cap.")
 
-    col1, col2, col3 = st.columns(3)
-    name_filter = col1.text_input("Search name")
-    al_filter = col2.text_input("Search alliance tag")
-    show_top_only = col3.checkbox(f"Top {top_n} per server only", value=True)
+    pt_df = players_df.copy()
 
-    tbl = top_players if show_top_only else filtered_players
+    # ── Server chicklets ───────────────────────────────────────────────────────
+    pt_all_servers = sorted(pt_df["Server"].dropna().astype(int).unique().tolist())
+    st.markdown("**Server**")
+    pt_selected_servers = st.pills(
+        "Server", [str(s) for s in pt_all_servers], selection_mode="multi",
+        default=[], key="pt_server_pills", label_visibility="collapsed",
+    )
+    st.caption("No servers selected = all servers.")
+
+    # ── Filter row ───────────────────────────────────────────────────────────
+    fc1, fc2, fc3, fc4, fc5 = st.columns([2, 2, 2, 1.3, 1.5])
+    pt_name = fc1.text_input("Search name", key="pt_name")
+
+    pt_alliance_opts = sorted(a for a in pt_df["Alliance"].dropna().unique().tolist() if a and a != "nan")
+    pt_alliance = fc2.multiselect("Alliance", pt_alliance_opts, key="pt_alliance")
+
+    pt_package_opts = sorted(p for p in pt_df["Package"].dropna().unique().tolist() if p)
+    pt_package = fc3.multiselect("Package", pt_package_opts, key="pt_package")
+
+    pt_candidate_only = fc4.checkbox("Candidates only", key="pt_candidate")
+
+    pt_range_opts = ["All"] + [label for label, _, _ in SERVER_RANGES] + ["Other"]
+    pt_range_choice = fc5.selectbox("Range", pt_range_opts, key="pt_range")
+
+    # ── Apply filters ────────────────────────────────────────────────────────
+    tbl = pt_df
+    if pt_selected_servers:
+        sel_ints = [int(s) for s in pt_selected_servers]
+        tbl = tbl[tbl["Server"].isin(sel_ints)]
+    if pt_range_choice != "All":
+        tbl = tbl[tbl["Range"] == pt_range_choice]
+    if pt_name:
+        tbl = tbl[tbl["Name"].str.contains(pt_name, case=False, na=False)]
+    if pt_alliance:
+        tbl = tbl[tbl["Alliance"].isin(pt_alliance)]
+    if pt_package:
+        tbl = tbl[tbl["Package"].isin(pt_package)]
+    if pt_candidate_only:
+        tbl = tbl[tbl["Candidate"]]
     tbl = tbl.copy()
 
-    if name_filter:
-        tbl = tbl[tbl["Name"].str.contains(name_filter, case=False, na=False)]
-    if al_filter:
-        tbl = tbl[tbl["Tag"].str.contains(al_filter, case=False, na=False)]
-
-    display_cols = ["Server", "Name", "Tag", "Alliance", "HQ",
-                    "Max Power", "Power", "Migrate Power", "Last Seen"]
+    display_cols = ["Range", "Server", "Name", "Tag", "Alliance", "HQ", "Candidate",
+                     "Package", "Max Power", "Power", "Migrate Power",
+                     "Last Seen", "Scan Age (Days)"]
     display_cols = [c for c in display_cols if c in tbl.columns]
 
     # Keep numeric columns numeric (don't pre-format to strings like "530M") so
@@ -604,12 +684,37 @@ with tab4:
     numeric_cols = ["Power", "Max Power", "Migrate Power", "Hero Power", "Building", "Science", "Troop", "Tank"]
     column_config = {c: st.column_config.NumberColumn(format="compact")
                       for c in numeric_cols if c in display_cols}
+    if "Scan Age (Days)" in display_cols:
+        column_config["Scan Age (Days)"] = st.column_config.NumberColumn(format="%d")
+    # Wrapping the table in a Styler (below) makes pandas fall back to its default
+    # 6-decimal float format for any numeric column with no explicit NumberColumn —
+    # Server/HQ are float dtype (see Key Design Notes) so they need one too, or they'd
+    # render as "166.000000" instead of "166".
+    for int_col in ("Server", "HQ"):
+        if int_col in display_cols:
+            column_config[int_col] = st.column_config.NumberColumn(format="%d")
+    if "Candidate" in display_cols:
+        column_config["Candidate"] = st.column_config.CheckboxColumn("Candidate", disabled=True)
+    if "Range" in display_cols:
+        column_config["Range"] = st.column_config.Column("Range", width="medium")
 
-    st.dataframe(
-        tbl[display_cols].sort_values(["Server", "Max Power"], ascending=[True, False]),
-        width='stretch', hide_index=True, column_config=column_config,
-    )
-    st.caption(f"{len(tbl):,} players shown")
+    def _scan_age_style(val):
+        if pd.isna(val):
+            return ""
+        if val > STALE_CUTOFF_DAYS_RED:
+            return "background-color:#e63946;color:white;"
+        if val > STALE_CUTOFF_DAYS:
+            return "background-color:#f1c40f;color:black;"
+        return ""
+
+    disp = tbl[display_cols].sort_values(["Server", "Max Power"], ascending=[True, False])
+    styler = disp.style
+    if "Scan Age (Days)" in disp.columns:
+        styler = styler.map(_scan_age_style, subset=["Scan Age (Days)"])
+
+    st.dataframe(styler, width='stretch', hide_index=True, column_config=column_config)
+    st.caption(f"{len(tbl):,} players shown — Scan Age highlighted yellow past "
+               f"{STALE_CUTOFF_DAYS} days, red past {STALE_CUTOFF_DAYS_RED}.")
 
 
 # ── Tab 5: Tale of the Tape ───────────────────────────────────────────────────
@@ -653,19 +758,13 @@ with tab5:
     st.markdown("---")
     st.markdown("#### Scan Freshness")
 
-    STALE_CUTOFF_DAYS = 7
-    now = pd.Timestamp.now()
-
     def _freshness_masks(df):
         scanned = pd.to_numeric(df["Science"], errors="coerce").notna() | \
                   pd.to_numeric(df["Tank"], errors="coerce").notna()
-        # Last Seen has a mix of "YYYY-MM-DD" and "YYYY-MM-DDTHH:MM:SS" strings in the DB.
-        # Plain pd.to_datetime infers ONE format from a sample of rows and silently NaTs
-        # every row that doesn't match it — which format wins depends on row order, so
-        # this bug is nondeterministic across queries. format="mixed" parses each value
-        # independently instead, avoiding that entirely.
-        last_seen = pd.to_datetime(df["Last Seen"], errors="coerce", format="mixed")
-        age_days = (now - last_seen).dt.days
+        # "Scan Age (Days)" is computed once in prepare() via parse_last_seen() — see
+        # that helper for why format="mixed" matters (mixed date/datetime strings in
+        # the DB otherwise get silently, nondeterministically NaT'd).
+        age_days = df["Scan Age (Days)"]
         fresh = scanned & (age_days <= STALE_CUTOFF_DAYS)
         # Treat a scanned player with an unparseable/missing Last Seen as stale rather
         # than silently dropping them from both buckets — we can't confirm freshness,
