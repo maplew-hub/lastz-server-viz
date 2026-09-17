@@ -188,6 +188,16 @@ def load_data():
         return load_data_local()
     return load_data_sheets()
 
+@st.cache_data(ttl=60 if os.path.exists(LOCAL_DB) else 300)
+def load_and_prepare_data():
+    """Streamlit reruns the whole script on every widget interaction (a pill click, a
+    keystroke in a search box), so anything done outside a cached function pays its full
+    cost again on EVERY interaction. prepare()'s row-wise Range labeling and mixed-format
+    Last Seen parsing over tens of thousands of players was the biggest offender — caching
+    load+prepare together means that work runs once per cache window (matching load_data's
+    own ttl), not once per click."""
+    return prepare(*load_data())
+
 def _coerce_numeric(df, cols):
     for col in cols:
         if col in df.columns:
@@ -370,8 +380,7 @@ with gandalf_col:
 exclude_gandalf = st.session_state.gandalf_no
 
 try:
-    players_df, alliances_df = load_data()
-    players_df, alliances_df = prepare(players_df, alliances_df)
+    players_df, alliances_df = load_and_prepare_data()
     if exclude_gandalf:
         players_df = players_df[players_df["Name"].str.lower() != GANDALF_NAME].copy()
 except Exception as e:
@@ -628,7 +637,7 @@ with tab3:
 with tab4:
     st.subheader("Player Search")
     st.caption("Independent of the sidebar filters — searches every player across all "
-               "server ranges (My Servers + S5 Migration), no Top N cap.")
+               "server ranges (My Servers + S5 Migration).")
 
     pt_df = players_df.copy()
 
@@ -642,7 +651,7 @@ with tab4:
     st.caption("No servers selected = all servers.")
 
     # ── Filter row ───────────────────────────────────────────────────────────
-    fc1, fc2, fc3, fc4, fc5 = st.columns([2, 2, 2, 1.3, 1.5])
+    fc1, fc2, fc3, fc4, fc5, fc6 = st.columns([2, 2, 2, 1.1, 1.3, 1.2])
     pt_name = fc1.text_input("Search name", key="pt_name")
 
     pt_alliance_opts = sorted(a for a in pt_df["Alliance"].dropna().unique().tolist() if a and a != "nan")
@@ -655,6 +664,9 @@ with tab4:
 
     pt_range_opts = ["All"] + [label for label, _, _ in SERVER_RANGES] + ["Other"]
     pt_range_choice = fc5.selectbox("Range", pt_range_opts, key="pt_range")
+
+    pt_limit_opts = [100, 500, 1000, 2500, 5000, "All"]
+    pt_limit = fc6.selectbox("Max rows shown", pt_limit_opts, index=2, key="pt_limit")
 
     # ── Apply filters ────────────────────────────────────────────────────────
     tbl = pt_df
@@ -707,14 +719,26 @@ with tab4:
             return "background-color:#f1c40f;color:black;"
         return ""
 
-    disp = tbl[display_cols].sort_values(["Server", "Max Power"], ascending=[True, False])
+    matched_count = len(tbl)
+    # Cap BEFORE sorting for display/styling — both the Styler pass and the browser-side
+    # grid slow down noticeably once this gets into the tens of thousands of rows (this is
+    # the full unfiltered range now that S5 Migration is included). Capping by highest Power
+    # keeps the most relevant accounts rather than an arbitrary slice biased toward whichever
+    # server number happens to sort first.
+    was_capped = pt_limit != "All" and matched_count > pt_limit
+    capped = tbl.sort_values("Power", ascending=False).head(pt_limit) if was_capped else tbl
+
+    disp = capped[display_cols].sort_values(["Server", "Max Power"], ascending=[True, False])
     styler = disp.style
     if "Scan Age (Days)" in disp.columns:
         styler = styler.map(_scan_age_style, subset=["Scan Age (Days)"])
 
     st.dataframe(styler, width='stretch', hide_index=True, column_config=column_config)
-    st.caption(f"{len(tbl):,} players shown — Scan Age highlighted yellow past "
-               f"{STALE_CUTOFF_DAYS} days, red past {STALE_CUTOFF_DAYS_RED}.")
+    caption = f"{len(disp):,} of {matched_count:,} matching players shown"
+    if was_capped:
+        caption += " (capped by highest Power — raise \"Max rows shown\" or narrow filters to see more)"
+    caption += f". Scan Age highlighted yellow past {STALE_CUTOFF_DAYS} days, red past {STALE_CUTOFF_DAYS_RED}."
+    st.caption(caption)
 
 
 # ── Tab 5: Tale of the Tape ───────────────────────────────────────────────────
