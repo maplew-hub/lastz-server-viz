@@ -1,4 +1,5 @@
 import os
+import math
 import json
 import sqlite3
 import streamlit as st
@@ -18,15 +19,19 @@ SCOPES = ["https://www.googleapis.com/auth/spreadsheets.readonly"]
 pd.set_option("styler.render.max_elements", 5_000_000)
 
 def fmt_power(val):
+    """Text-formatted power/score display. Uses math.floor (not round/f-string rounding)
+    at each unit's decimal place so a score is never shown higher than it truly is —
+    e.g. 149,960,000 always renders "149.9M", never "150.0M". Fixed 2026-09-22 (was
+    plain f-string formatting, which rounds to nearest and could round scores up)."""
     if pd.isna(val):
         return "—"
     val = int(val)
     if val >= 1_000_000_000_000:
-        return f"{val / 1_000_000_000_000:.2f}T"
+        return f"{math.floor(val / 1_000_000_000_000 * 100) / 100:.2f}T"
     if val >= 1_000_000_000:
-        return f"{val / 1_000_000_000:.2f}B"
+        return f"{math.floor(val / 1_000_000_000 * 100) / 100:.2f}B"
     if val >= 1_000_000:
-        return f"{val / 1_000_000:.1f}M"
+        return f"{math.floor(val / 1_000_000 * 10) / 10:.1f}M"
     return f"{val:,}"
 
 def fmt_power_delta(val):
@@ -35,6 +40,25 @@ def fmt_power_delta(val):
         return "0"
     val = int(val)
     return ("-" if val < 0 else "+") + fmt_power(abs(val))
+
+def floor_compact(val):
+    """Pre-floors a value to whatever grid Streamlit's NumberColumn(format="compact")
+    will display it at (backed by Intl.NumberFormat(notation:"compact"), confirmed via
+    node: shows 1 decimal when the scaled mantissa is <10, otherwise a whole number —
+    e.g. "5.2M"/"52M"/"523M"), so the compact column shows the same floored value
+    fmt_power's text columns do, instead of Intl's default round-to-nearest sometimes
+    rounding a score up (e.g. 149,960,000 was displaying as "150M"). Added 2026-09-22.
+    Non-negative power/score values only — not meant for signed deltas."""
+    if pd.isna(val):
+        return val
+    val = float(val)
+    if val < 1000:
+        return val
+    for scale in (1_000_000_000_000, 1_000_000_000, 1_000_000, 1_000):
+        if val >= scale:
+            grid = scale / 10 if (val / scale) < 10 else scale
+            return math.floor(val / grid) * grid
+    return val
 
 def parse_last_seen(series):
     """Last Seen has a mix of "YYYY-MM-DD" and "YYYY-MM-DDTHH:MM:SS" strings in the DB.
@@ -290,7 +314,8 @@ NET_TABLE_COLUMN_CONFIG = {
 def category_summary(df):
     """Category, Count, Total Power table for a slice of players_df. Total Power stays
     numeric (raw sum) — format for display via column_config, not a pre-formatted string,
-    so st.dataframe's column sort stays numeric."""
+    so st.dataframe's column sort stays numeric. Pre-floored via floor_compact() (2026-09-22)
+    so the "compact" column_config format never rounds the total up."""
     d = df.copy()
     d["Category"] = categorize(d["Migrate Power"])
     summary = (
@@ -300,6 +325,7 @@ def category_summary(df):
         .fillna(0)
     )
     summary["Count"] = summary["Count"].astype(int)
+    summary["Total Power"] = summary["Total Power"].apply(floor_compact)
     return summary[["Count", "Total Power"]].reset_index()
 
 CATEGORY_SUMMARY_COLUMN_CONFIG = {
@@ -728,7 +754,13 @@ with tab4:
     was_capped = pt_limit != "All" and matched_count > pt_limit
     capped = tbl.sort_values("Power", ascending=False).head(pt_limit) if was_capped else tbl
 
-    disp = capped[display_cols].sort_values(["Server", "Max Power"], ascending=[True, False])
+    disp = capped[display_cols].sort_values(["Server", "Max Power"], ascending=[True, False]).copy()
+    # Sort above uses the true unrounded values — floor only the values actually
+    # rendered by the "compact" columns so a score never displays higher than it is
+    # (2026-09-22; see floor_compact()).
+    for c in numeric_cols:
+        if c in disp.columns:
+            disp[c] = disp[c].apply(floor_compact)
     styler = disp.style
     if "Scan Age (Days)" in disp.columns:
         styler = styler.map(_scan_age_style, subset=["Scan Age (Days)"])
@@ -1056,6 +1088,10 @@ with tab6:
             display_cols = ["Name", "Tag", "Alliance", "HQ", "Power", "Migrate Power",
                             "Orig Server", "S3 Server", "Server"]
             display_cols = [c for c in display_cols if c in disp.columns]
+            # Floor the displayed values only — sort above already ran on the true numbers.
+            for c in ("Power", "Migrate Power"):
+                if c in disp.columns:
+                    disp[c] = disp[c].apply(floor_compact)
             st.dataframe(disp[display_cols], hide_index=True, width='stretch', column_config={
                 "Power": st.column_config.NumberColumn(format="compact"),
                 "Migrate Power": st.column_config.NumberColumn(format="compact"),
