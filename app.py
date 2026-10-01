@@ -168,7 +168,8 @@ def render_drill(clicked, label_a, label_b):
 def load_data_local():
     con = sqlite3.connect(LOCAL_DB)
     players_df = pd.read_sql_query("""
-        SELECT p.name AS Name, p.alliance_abbr AS Tag, p.alliance_name AS Alliance,
+        SELECT p.name AS Name, p.alliance_id AS [Alliance ID],
+               p.alliance_abbr AS Tag, p.alliance_name AS Alliance,
                p.hq_level AS HQ, p.server AS Server,
                p.original_server AS [Orig Server], p.s3_server AS [S3 Server],
                p.power AS Power,
@@ -182,7 +183,7 @@ def load_data_local():
         ORDER BY p.power DESC
     """, con)
     alliances_df = pd.read_sql_query("""
-        SELECT a.name AS Alliance, a.abbr AS Tag, a.server AS Server,
+        SELECT a.alliance_id AS [Alliance ID], a.name AS Alliance, a.abbr AS Tag, a.server AS Server,
                a.rank AS Rank, a.fightpower AS [Fight Power],
                a.cur_member AS Members, a.max_member AS [Max Members],
                COUNT(p.uid) AS [Players in DB],
@@ -678,6 +679,14 @@ with tab3:
 # an alliance row to filter the player table — for finding a specific target to dig
 # into rather than browsing the full unfiltered range. Independent of the sidebar
 # filters, like the Player Table tab.
+#
+# Joins players to alliances via the stable "Alliance ID" column (added to both
+# players_df and alliances_df 2026-10-01, migrate_scout.py side) when present, falling
+# back to (Server, Alliance name) string-matching otherwise — e.g. against a Sheets
+# export that hasn't been re-synced since the ID was added yet. Name-matching
+# undercounts any alliance renamed since some members' last scan (~2.3% of
+# alliance-having players DB-wide, measured 2026-10-01); ID-matching doesn't have
+# that gap. See `dd_has_alliance_id` below.
 
 with tab7:
     st.subheader("🎯 Drilldown")
@@ -700,6 +709,15 @@ with tab7:
     dd_alliances_all = alliances_df.dropna(subset=["Server"]).copy()
     dd_alliances_all["Server"] = dd_alliances_all["Server"].astype(int)
 
+    # "Alliance ID" (added to both players_df and alliances_df 2026-10-01) is a stable
+    # join key — name-matching alone undercounts any alliance renamed since some
+    # members' last scan. Fall back to (Server, Alliance name) if an older Sheets sync
+    # hasn't been re-run yet and doesn't carry "Alliance ID" on both sides.
+    dd_has_alliance_id = ("Alliance ID" in dd_players.columns and
+                           "Alliance ID" in dd_alliances_all.columns and
+                           dd_players["Alliance ID"].notna().any() and
+                           dd_alliances_all["Alliance ID"].notna().any())
+
     dd_alliances_scoped = dd_alliances_all.dropna(subset=["Fight Power"]).copy()
     if dd_top_n:
         dd_alliances_scoped = dd_alliances_scoped[dd_alliances_scoped["Rank"] <= dd_top_n]
@@ -712,10 +730,13 @@ with tab7:
 
     # Players counted toward Scanned/Stale/Total Migrate Power are the members of the
     # SAME scoped alliance set as Total Power above (matching migrate_scout.py's
-    # db_get_server_power) — there's no alliance_id here, so match on (Server, Alliance
-    # name), which is unique in practice.
-    scope_keys = dd_alliances_scoped[["Server", "Alliance"]].drop_duplicates()
-    dd_players_scoped = dd_players.merge(scope_keys, on=["Server", "Alliance"], how="inner")
+    # db_get_server_power).
+    if dd_has_alliance_id:
+        scope_keys = dd_alliances_scoped[["Alliance ID"]].drop_duplicates()
+        dd_players_scoped = dd_players.merge(scope_keys, on="Alliance ID", how="inner")
+    else:
+        scope_keys = dd_alliances_scoped[["Server", "Alliance"]].drop_duplicates()
+        dd_players_scoped = dd_players.merge(scope_keys, on=["Server", "Alliance"], how="inner")
 
     players_by_server = (
         dd_players_scoped.groupby("Server")
@@ -774,15 +795,19 @@ with tab7:
         al_scope = dd_alliances_all.copy()
         st.markdown("**Alliances** (all servers — select a server above to narrow)")
 
-    al_cols = ["Server", "Rank", "Tag", "Alliance", "Fight Power",
-               "Members", "Max Members", "Players in DB", "With Migrate"]
-    al_cols = [c for c in al_cols if c in al_scope.columns]
+    al_display_cols = ["Server", "Rank", "Tag", "Alliance", "Fight Power",
+                        "Members", "Max Members", "Players in DB", "With Migrate"]
+    al_display_cols = [c for c in al_display_cols if c in al_scope.columns]
+    # Keep "Alliance ID" in the underlying data (needed to filter players below) but
+    # out of column_order so it never renders — a raw UUID isn't useful on screen.
+    al_cols = al_display_cols + (["Alliance ID"] if dd_has_alliance_id else [])
     al_scope = al_scope.dropna(subset=["Fight Power"])[al_cols] \
                        .sort_values(["Server", "Rank"]).reset_index(drop=True)
     al_scope["Fight Power"] = al_scope["Fight Power"].apply(floor_compact)
 
     al_event = st.dataframe(
         al_scope, width='stretch', hide_index=True,
+        column_order=al_display_cols,
         column_config={
             "Server":        st.column_config.NumberColumn(format="%d"),
             "Rank":          st.column_config.NumberColumn(format="%d"),
@@ -798,18 +823,25 @@ with tab7:
         # whatever now happens to sit in that same grid position.
         key=f"dd_alliance_table_{dd_selected_server}",
     )
-    dd_selected_alliance = None  # (server, alliance name, known member count) or None
+    dd_selected_alliance = None  # (server, alliance name, alliance id or None, known member count)
     if al_event.selection.rows:
         sel_al = al_scope.iloc[al_event.selection.rows[0]]
         known_members = int(sel_al["Players in DB"]) if "Players in DB" in sel_al else None
-        dd_selected_alliance = (int(sel_al["Server"]), sel_al["Alliance"], known_members)
+        sel_alliance_id = sel_al["Alliance ID"] if dd_has_alliance_id else None
+        dd_selected_alliance = (int(sel_al["Server"]), sel_al["Alliance"], sel_alliance_id, known_members)
 
     # ── Player table, filtered by the selected alliance (or server, or nothing) ─
     dd_known_members = None
+    dd_used_id_match = False
     if dd_selected_alliance is not None:
-        sel_server, sel_alliance_name, dd_known_members = dd_selected_alliance
-        pl_scope = dd_players[(dd_players["Server"] == sel_server) &
-                               (dd_players["Alliance"] == sel_alliance_name)]
+        sel_server, sel_alliance_name, sel_alliance_id, dd_known_members = dd_selected_alliance
+        dd_used_id_match = dd_has_alliance_id and pd.notna(sel_alliance_id)
+        if dd_used_id_match:
+            pl_scope = dd_players[(dd_players["Server"] == sel_server) &
+                                   (dd_players["Alliance ID"] == sel_alliance_id)]
+        else:
+            pl_scope = dd_players[(dd_players["Server"] == sel_server) &
+                                   (dd_players["Alliance"] == sel_alliance_name)]
         st.markdown(f"**Players in {sel_alliance_name} (server {sel_server})**")
     elif dd_selected_server is not None:
         pl_scope = dd_players[dd_players["Server"] == dd_selected_server]
@@ -861,14 +893,21 @@ with tab7:
     st.caption(f"{len(pl_show):,} of {dd_matched:,} matching players shown{cap_note}.")
     if (dd_known_members is not None and not dd_search and not dd_candidates_only
             and dd_matched < dd_known_members):
-        st.caption(
-            f"⚠️ This alliance shows {dd_known_members} members in the Players in DB column "
-            f"above, but only {dd_matched} matched here by name — some members' cached "
-            "alliance name is out of date (the alliance was renamed since their last scan). "
-            "This is a known gap: the site currently matches players to alliances by name "
-            "since alliance IDs aren't in the exported data yet; the desktop Migrate Scout "
-            "tool doesn't have this issue since it joins on the real ID."
-        )
+        if dd_used_id_match:
+            st.caption(
+                f"⚠️ This alliance shows {dd_known_members} members in the Players in DB "
+                f"column above, but only {dd_matched} matched here by alliance ID — this "
+                "would point to a real data inconsistency (e.g. a player mid-transfer "
+                "between alliances when last scanned) rather than the old name-matching gap."
+            )
+        else:
+            st.caption(
+                f"⚠️ This alliance shows {dd_known_members} members in the Players in DB "
+                f"column above, but only {dd_matched} matched here by name — some members' "
+                "cached alliance name is out of date (the alliance was renamed since their "
+                "last scan), and this data source doesn't have Alliance IDs yet to match on "
+                "instead. Re-sync from Migrate Scout to pick up accurate IDs."
+            )
 
 
 # ── Tab 4: Player Table ───────────────────────────────────────────────────────
