@@ -41,24 +41,35 @@ def fmt_power_delta(val):
     val = int(val)
     return ("-" if val < 0 else "+") + fmt_power(abs(val))
 
-def floor_compact(val):
-    """Pre-floors a value to whatever grid Streamlit's NumberColumn(format="compact")
-    will display it at (backed by Intl.NumberFormat(notation:"compact"), confirmed via
-    node: shows 1 decimal when the scaled mantissa is <10, otherwise a whole number —
-    e.g. "5.2M"/"52M"/"523M"), so the compact column shows the same floored value
-    fmt_power's text columns do, instead of Intl's default round-to-nearest sometimes
-    rounding a score up (e.g. 149,960,000 was displaying as "150M"). Added 2026-09-22.
-    Non-negative power/score values only — not meant for signed deltas."""
+def fmt_compact_2dp(val):
+    """Text formatter for the sortable "compact" power columns — always 2 decimal
+    places at whatever K/M/B/T unit auto-selects, e.g. "45.67B", "5.20M", "123.00K".
+    Floors (never rounds up) at that 2nd decimal, same "never overstate a score"
+    reasoning as fmt_power. Replaces floor_compact() (added 2026-09-22, removed
+    2026-10-01): that helper pre-floored a raw value to whatever precision Streamlit's
+    built-in NumberColumn(format="compact") uses (0-1 decimals, via
+    Intl.NumberFormat — confirmed via node, not configurable to more decimals), so
+    this format's 2-decimal display replaces that mechanism rather than layering on
+    top of it: columns using this must NOT also carry a column_config "compact"
+    NumberColumn (it would win over a Styler's .format() and override this back to
+    0-1 decimals) — apply this via `df.style.format({col: fmt_compact_2dp})` instead,
+    which keeps the underlying column numeric (st.dataframe sorts by that, not the
+    rendered text — same reasoning as column_config's own display/sort split) while
+    controlling the rendered string directly.
+    Handles negative values (for the Migration Turnover table's signed Net Power
+    deltas) by formatting the magnitude and re-attaching the sign."""
     if pd.isna(val):
-        return val
+        return "—"
     val = float(val)
-    if val < 1000:
-        return val
-    for scale in (1_000_000_000_000, 1_000_000_000, 1_000_000, 1_000):
-        if val >= scale:
-            grid = scale / 10 if (val / scale) < 10 else scale
-            return math.floor(val / grid) * grid
-    return val
+    sign = "-" if val < 0 else ""
+    aval = abs(val)
+    if aval < 1000:
+        return f"{sign}{aval:,.0f}"
+    for scale, suffix in ((1_000_000_000_000, "T"), (1_000_000_000, "B"),
+                          (1_000_000, "M"), (1_000, "K")):
+        if aval >= scale:
+            return f"{sign}{math.floor(aval / scale * 100) / 100:.2f}{suffix}"
+    return f"{sign}{aval:,.0f}"
 
 def parse_last_seen(series):
     """Last Seen has a mix of "YYYY-MM-DD" and "YYYY-MM-DDTHH:MM:SS" strings in the DB.
@@ -304,24 +315,24 @@ def net_category_table(df, from_col, to_col):
         cols += [f"Net {c} Players", f"Net {c} Power"]
     return out[cols]
 
+# "Net Total Power"/"Net {c} Power" are 2-decimal-compact via Styler.format() at the
+# call site (see fmt_compact_2dp) rather than column_config — kept out of this dict
+# entirely, since a column_config NumberColumn would take precedence over the
+# Styler's format and win back to the built-in 0-1-decimal "compact" rendering.
+NET_TABLE_COMPACT_COLS = ["Net Total Power"] + [f"Net {c} Power" for c in NET_CATS]
 NET_TABLE_COLUMN_CONFIG = {
     "Server": st.column_config.NumberColumn(format="%d"),
-    "Net Total Power": st.column_config.NumberColumn(format="compact"),
     **{
         f"Net {c} Players": st.column_config.NumberColumn(format="%+d")
-        for c in NET_CATS
-    },
-    **{
-        f"Net {c} Power": st.column_config.NumberColumn(format="compact")
         for c in NET_CATS
     },
 }
 
 def category_summary(df):
     """Category, Count, Total Power table for a slice of players_df. Total Power stays
-    numeric (raw sum) — format for display via column_config, not a pre-formatted string,
-    so st.dataframe's column sort stays numeric. Pre-floored via floor_compact() (2026-09-22)
-    so the "compact" column_config format never rounds the total up."""
+    numeric (raw sum) — formatted for display via Styler.format(fmt_compact_2dp) at
+    the call site, not a pre-formatted string, so st.dataframe's column sort stays
+    numeric."""
     d = df.copy()
     d["Category"] = categorize(d["Migrate Power"])
     summary = (
@@ -331,12 +342,7 @@ def category_summary(df):
         .fillna(0)
     )
     summary["Count"] = summary["Count"].astype(int)
-    summary["Total Power"] = summary["Total Power"].apply(floor_compact)
     return summary[["Count", "Total Power"]].reset_index()
-
-CATEGORY_SUMMARY_COLUMN_CONFIG = {
-    "Total Power": st.column_config.NumberColumn(format="compact"),
-}
 
 STALE_CUTOFF_DAYS = 7
 STALE_CUTOFF_DAYS_RED = 14
@@ -760,10 +766,6 @@ with tab7:
     server_table["Players"] = server_table["Players"].astype(int)
     server_table["Scanned"] = server_table["Scanned"].astype(int)
     server_table["Stale"]   = server_table["Stale"].astype(int)
-    # floor_compact (2026-09-22) so the "compact" NumberColumn format below never
-    # rounds a total up past its true value.
-    server_table["Total Power"]          = server_table["Total Power"].apply(floor_compact)
-    server_table["Total Migrate Power"]  = server_table["Total Migrate Power"].apply(floor_compact)
     server_table = (
         server_table[["Server", "Players", "Scanned", "Stale", "Total Power", "Total Migrate Power"]]
         .sort_values("Server")
@@ -772,14 +774,14 @@ with tab7:
 
     st.markdown("**Servers**")
     srv_event = st.dataframe(
-        server_table, width='stretch', hide_index=True,
+        server_table.style.format({"Total Power": fmt_compact_2dp,
+                                    "Total Migrate Power": fmt_compact_2dp}),
+        width='stretch', hide_index=True,
         column_config={
-            "Server":               st.column_config.NumberColumn(format="%d"),
-            "Players":              st.column_config.NumberColumn(format="%d"),
-            "Scanned":              st.column_config.NumberColumn(format="%d"),
-            "Stale":                st.column_config.NumberColumn(format="%d"),
-            "Total Power":          st.column_config.NumberColumn(format="compact"),
-            "Total Migrate Power":  st.column_config.NumberColumn(format="compact"),
+            "Server":   st.column_config.NumberColumn(format="%d"),
+            "Players":  st.column_config.NumberColumn(format="%d"),
+            "Scanned":  st.column_config.NumberColumn(format="%d"),
+            "Stale":    st.column_config.NumberColumn(format="%d"),
         },
         on_select="rerun", selection_mode="single-row", key="dd_server_table",
     )
@@ -803,15 +805,14 @@ with tab7:
     al_cols = al_display_cols + (["Alliance ID"] if dd_has_alliance_id else [])
     al_scope = al_scope.dropna(subset=["Fight Power"])[al_cols] \
                        .sort_values(["Server", "Rank"]).reset_index(drop=True)
-    al_scope["Fight Power"] = al_scope["Fight Power"].apply(floor_compact)
 
     al_event = st.dataframe(
-        al_scope, width='stretch', hide_index=True,
+        al_scope.style.format({"Fight Power": fmt_compact_2dp}),
+        width='stretch', hide_index=True,
         column_order=al_display_cols,
         column_config={
             "Server":        st.column_config.NumberColumn(format="%d"),
             "Rank":          st.column_config.NumberColumn(format="%d"),
-            "Fight Power":   st.column_config.NumberColumn(format="compact"),
             "Members":       st.column_config.NumberColumn(format="%d"),
             "Max Members":   st.column_config.NumberColumn(format="%d"),
             "Players in DB": st.column_config.NumberColumn(format="%d"),
@@ -873,17 +874,14 @@ with tab7:
     pl_show = (pl_show[pl_cols]
                .sort_values(["Server", "Power"], ascending=[True, False])
                .reset_index(drop=True).copy())
-    for c in ("Power", "Migrate Power"):
-        if c in pl_show.columns:
-            pl_show[c] = pl_show[c].apply(floor_compact)
 
+    pl_compact_cols = [c for c in ("Power", "Migrate Power") if c in pl_show.columns]
     st.dataframe(
-        pl_show, width='stretch', hide_index=True,
+        pl_show.style.format({c: fmt_compact_2dp for c in pl_compact_cols}),
+        width='stretch', hide_index=True,
         column_config={
             "Server":          st.column_config.NumberColumn(format="%d"),
             "HQ":              st.column_config.NumberColumn(format="%d"),
-            "Power":           st.column_config.NumberColumn(format="compact"),
-            "Migrate Power":   st.column_config.NumberColumn(format="compact"),
             "Scan Age (Days)": st.column_config.NumberColumn(format="%d"),
             "Candidate":       st.column_config.CheckboxColumn("Candidate", disabled=True),
         },
@@ -970,10 +968,12 @@ with tab4:
 
     # Keep numeric columns numeric (don't pre-format to strings like "530M") so
     # st.dataframe's column-header sort is numeric, not alphabetic — same fix as the
-    # Migration Turnover table. column_config handles the compact display formatting.
+    # Migration Turnover table. Styler.format(fmt_compact_2dp) handles the compact
+    # display formatting (kept out of column_config — a column_config NumberColumn
+    # would take precedence over the Styler's .format() and win back to the built-in
+    # "compact" preset's 0-1-decimal precision instead of fmt_compact_2dp's fixed 2).
     numeric_cols = ["Power", "Max Power", "Migrate Power", "Hero Power", "Building", "Science", "Troop", "Tank"]
-    column_config = {c: st.column_config.NumberColumn(format="compact")
-                      for c in numeric_cols if c in display_cols}
+    column_config = {}
     if "Scan Age (Days)" in display_cols:
         column_config["Scan Age (Days)"] = st.column_config.NumberColumn(format="%d")
     # Wrapping the table in a Styler (below) makes pandas fall back to its default
@@ -1007,13 +1007,7 @@ with tab4:
     capped = tbl.sort_values("Power", ascending=False).head(pt_limit) if was_capped else tbl
 
     disp = capped[display_cols].sort_values(["Server", "Max Power"], ascending=[True, False]).copy()
-    # Sort above uses the true unrounded values — floor only the values actually
-    # rendered by the "compact" columns so a score never displays higher than it is
-    # (2026-09-22; see floor_compact()).
-    for c in numeric_cols:
-        if c in disp.columns:
-            disp[c] = disp[c].apply(floor_compact)
-    styler = disp.style
+    styler = disp.style.format({c: fmt_compact_2dp for c in numeric_cols if c in disp.columns})
     if "Scan Age (Days)" in disp.columns:
         styler = styler.map(_scan_age_style, subset=["Scan Age (Days)"])
 
@@ -1297,7 +1291,9 @@ with tab6:
 
     table = net_category_table(players_df, from_col, to_col)
     full_height = 38 + 35 * len(table) + 3  # header + one row per server, no inner scroll
-    st.dataframe(table, hide_index=True, width='stretch', height=full_height,
+    table_styler = table.style.format(
+        {c: fmt_compact_2dp for c in NET_TABLE_COMPACT_COLS if c in table.columns})
+    st.dataframe(table_styler, hide_index=True, width='stretch', height=full_height,
                  column_config=NET_TABLE_COLUMN_CONFIG)
 
     # ── Per-server turnover detail ──────────────────────────────────────────────
@@ -1330,8 +1326,9 @@ with tab6:
         with box_col:
             st.markdown(f"**{title}**")
             st.caption(f"{len(box_df):,} players · {fmt_power(box_df['Power'].sum())} total power")
-            st.dataframe(category_summary(box_df), hide_index=True, width='stretch',
-                         column_config=CATEGORY_SUMMARY_COLUMN_CONFIG)
+            cat_summary = category_summary(box_df)
+            st.dataframe(cat_summary.style.format({"Total Power": fmt_compact_2dp}),
+                         hide_index=True, width='stretch')
 
     detail_tabs = st.tabs([title for title, _ in boxes])
     for dtab, (title, box_df) in zip(detail_tabs, boxes):
@@ -1340,12 +1337,8 @@ with tab6:
             display_cols = ["Name", "Tag", "Alliance", "HQ", "Power", "Migrate Power",
                             "Orig Server", "S3 Server", "Server"]
             display_cols = [c for c in display_cols if c in disp.columns]
-            # Floor the displayed values only — sort above already ran on the true numbers.
-            for c in ("Power", "Migrate Power"):
-                if c in disp.columns:
-                    disp[c] = disp[c].apply(floor_compact)
-            st.dataframe(disp[display_cols], hide_index=True, width='stretch', column_config={
-                "Power": st.column_config.NumberColumn(format="compact"),
-                "Migrate Power": st.column_config.NumberColumn(format="compact"),
-            })
+            disp_compact_cols = [c for c in ("Power", "Migrate Power") if c in disp.columns]
+            st.dataframe(
+                disp[display_cols].style.format({c: fmt_compact_2dp for c in disp_compact_cols}),
+                hide_index=True, width='stretch')
             st.caption(f"{len(disp):,} players shown")
