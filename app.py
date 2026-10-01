@@ -67,9 +67,13 @@ def parse_last_seen(series):
     return pd.to_datetime(series, errors="coerce", format="mixed")
 
 # Server ranges shown as a "Range" label throughout the app. Mirrors
-# ~/lastz-tools/instances.json's "My Servers"/"S5 Migration" entries (Friend Servers is
-# intentionally excluded — that range never flows into the "All Players" data source).
-SERVER_RANGES = [("My Servers", 225, 256), ("S5 Migration", 193, 224)]
+# ~/lastz-tools/instances.json's "My Servers" entry (Friend Servers is intentionally
+# excluded — that range never flows into the "All Players" data source). Was two
+# entries ("My Servers" 225-256 + "S5 Migration" 193-224) until migrate_scout.py's
+# instances.json merged S5 Migration into My Servers on 2026-09-22 (contiguous
+# ranges, one migration wave folded into the main one) — updated here to match,
+# since this had gone stale (2026-10-01).
+SERVER_RANGES = [("My Servers", 193, 256)]
 
 def server_range_label(server_num):
     if pd.isna(server_num):
@@ -172,6 +176,7 @@ def load_data_local():
                p.building_power AS Building, p.science_power AS Science,
                p.army_power AS Troop, p.tank_power AS Tank,
                p.player_max_power AS [Max Power], p.last_seen AS [Last Seen],
+               p.detail_seen AS [Detail Seen],
                COALESCE(p.candidate, 0) AS Candidate, pk.name AS Package
         FROM players p LEFT JOIN packages pk ON pk.package_id = p.package_id
         ORDER BY p.power DESC
@@ -368,7 +373,16 @@ def prepare(players_df, alliances_df):
         players_df["Package"] = ""
     if "Server" in players_df.columns:
         players_df["Range"] = players_df["Server"].apply(server_range_label)
-    if "Last Seen" in players_df.columns:
+    # "Scan Age (Days)" means age of the actual per-player detail/migrate-power scan
+    # (matches migrate_scout.py's "stale = detail_seen >= 14 days" definition), not
+    # general alliance-membership freshness — "Last Seen" updates far more often (any
+    # alliance member-list sync touches it) and was used here by mistake until
+    # 2026-10-01, making every "stale" reading throughout this app look fresher than
+    # the underlying scan data really was. Prefer "Detail Seen"; fall back to "Last
+    # Seen" only if an older data source doesn't carry it yet.
+    if "Detail Seen" in players_df.columns:
+        players_df["Scan Age (Days)"] = (pd.Timestamp.now() - parse_last_seen(players_df["Detail Seen"])).dt.days
+    elif "Last Seen" in players_df.columns:
         players_df["Scan Age (Days)"] = (pd.Timestamp.now() - parse_last_seen(players_df["Last Seen"])).dt.days
     return players_df, alliances_df
 
@@ -481,9 +495,9 @@ top_players = (
 
 # ── Tabs ──────────────────────────────────────────────────────────────────────
 
-tab5, tab1, tab2, tab3, tab4, tab6 = st.tabs([
-    "⚖️ Tale of the Tape", "📊 Server Totals", "📦 Power Distribution", "🏰 Alliances", "🔍 Player Table",
-    "🔄 Migration Turnover"
+tab5, tab1, tab2, tab3, tab7, tab4, tab6 = st.tabs([
+    "⚖️ Tale of the Tape", "📊 Server Totals", "📦 Power Distribution", "🏰 Alliances", "🎯 Drilldown",
+    "🔍 Player Table", "🔄 Migration Turnover"
 ])
 
 
@@ -655,6 +669,205 @@ with tab3:
                          "Members", "Max Members", "Players in DB", "With Migrate"]]
             .sort_values(["Server", "Rank"]),
             width='stretch', hide_index=True
+        )
+
+
+# ── Tab 7: Drilldown (Server → Alliance → Player) ───────────────────────────────
+# Mirrors the desktop Migrate Scout tool's Server/Alliances/Players panel layout
+# (added there 2026-09-30): click a server row to filter the alliance table, click
+# an alliance row to filter the player table — for finding a specific target to dig
+# into rather than browsing the full unfiltered range. Independent of the sidebar
+# filters, like the Player Table tab.
+
+with tab7:
+    st.subheader("🎯 Drilldown")
+    st.caption("Click a server below to filter its alliances, then click an alliance to filter "
+               "its players — server → alliance → player, same flow as the desktop tool's "
+               "Server panel. Independent of the sidebar filters.")
+
+    dd_topn_label = st.radio(
+        "Alliances counted in the totals below", ["All", "Top 5", "Top 10"],
+        horizontal=True, key="dd_topn",
+    )
+    dd_top_n = {"All": None, "Top 5": 5, "Top 10": 10}[dd_topn_label]
+    st.caption("Only scopes the Total Power / Total Migrate Power columns in the server table — "
+               "selecting a server still shows every alliance on it, any rank, below.")
+
+    # ── Build the per-server rollup ─────────────────────────────────────────────
+    dd_players = players_df.dropna(subset=["Server"]).copy()
+    dd_players["Server"] = dd_players["Server"].astype(int)
+
+    dd_alliances_all = alliances_df.dropna(subset=["Server"]).copy()
+    dd_alliances_all["Server"] = dd_alliances_all["Server"].astype(int)
+
+    dd_alliances_scoped = dd_alliances_all.dropna(subset=["Fight Power"]).copy()
+    if dd_top_n:
+        dd_alliances_scoped = dd_alliances_scoped[dd_alliances_scoped["Rank"] <= dd_top_n]
+
+    power_by_server = (
+        dd_alliances_scoped.groupby("Server")
+        .agg(**{"Total Power": ("Fight Power", "sum")})
+        .reset_index()
+    )
+
+    # Players counted toward Scanned/Stale/Total Migrate Power are the members of the
+    # SAME scoped alliance set as Total Power above (matching migrate_scout.py's
+    # db_get_server_power) — there's no alliance_id here, so match on (Server, Alliance
+    # name), which is unique in practice.
+    scope_keys = dd_alliances_scoped[["Server", "Alliance"]].drop_duplicates()
+    dd_players_scoped = dd_players.merge(scope_keys, on=["Server", "Alliance"], how="inner")
+
+    players_by_server = (
+        dd_players_scoped.groupby("Server")
+        .agg(Players=("Name", "size"),
+             Scanned=("Migrate Power", lambda s: int(s.notna().sum())),
+             **{"Total Migrate Power": ("Migrate Power", "sum")})
+        .reset_index()
+    )
+    stale_by_server = (
+        dd_players_scoped[dd_players_scoped["Scan Age (Days)"] >= STALE_CUTOFF_DAYS_RED]
+        .groupby("Server").size().reset_index(name="Stale")
+    )
+
+    server_table = (
+        power_by_server
+        .merge(players_by_server, on="Server", how="left")
+        .merge(stale_by_server, on="Server", how="left")
+    )
+    for c in ("Players", "Scanned", "Stale", "Total Migrate Power"):
+        server_table[c] = server_table[c].fillna(0)
+    server_table["Players"] = server_table["Players"].astype(int)
+    server_table["Scanned"] = server_table["Scanned"].astype(int)
+    server_table["Stale"]   = server_table["Stale"].astype(int)
+    # floor_compact (2026-09-22) so the "compact" NumberColumn format below never
+    # rounds a total up past its true value.
+    server_table["Total Power"]          = server_table["Total Power"].apply(floor_compact)
+    server_table["Total Migrate Power"]  = server_table["Total Migrate Power"].apply(floor_compact)
+    server_table = (
+        server_table[["Server", "Players", "Scanned", "Stale", "Total Power", "Total Migrate Power"]]
+        .sort_values("Server")
+        .reset_index(drop=True)
+    )
+
+    st.markdown("**Servers**")
+    srv_event = st.dataframe(
+        server_table, width='stretch', hide_index=True,
+        column_config={
+            "Server":               st.column_config.NumberColumn(format="%d"),
+            "Players":              st.column_config.NumberColumn(format="%d"),
+            "Scanned":              st.column_config.NumberColumn(format="%d"),
+            "Stale":                st.column_config.NumberColumn(format="%d"),
+            "Total Power":          st.column_config.NumberColumn(format="compact"),
+            "Total Migrate Power":  st.column_config.NumberColumn(format="compact"),
+        },
+        on_select="rerun", selection_mode="single-row", key="dd_server_table",
+    )
+    dd_selected_server = None
+    if srv_event.selection.rows:
+        dd_selected_server = int(server_table.iloc[srv_event.selection.rows[0]]["Server"])
+
+    # ── Alliance table, filtered by the selected server (or all servers) ───────
+    if dd_selected_server is not None:
+        al_scope = dd_alliances_all[dd_alliances_all["Server"] == dd_selected_server].copy()
+        st.markdown(f"**Alliances on server {dd_selected_server}**")
+    else:
+        al_scope = dd_alliances_all.copy()
+        st.markdown("**Alliances** (all servers — select a server above to narrow)")
+
+    al_cols = ["Server", "Rank", "Tag", "Alliance", "Fight Power",
+               "Members", "Max Members", "Players in DB", "With Migrate"]
+    al_cols = [c for c in al_cols if c in al_scope.columns]
+    al_scope = al_scope.dropna(subset=["Fight Power"])[al_cols] \
+                       .sort_values(["Server", "Rank"]).reset_index(drop=True)
+    al_scope["Fight Power"] = al_scope["Fight Power"].apply(floor_compact)
+
+    al_event = st.dataframe(
+        al_scope, width='stretch', hide_index=True,
+        column_config={
+            "Server":        st.column_config.NumberColumn(format="%d"),
+            "Rank":          st.column_config.NumberColumn(format="%d"),
+            "Fight Power":   st.column_config.NumberColumn(format="compact"),
+            "Members":       st.column_config.NumberColumn(format="%d"),
+            "Max Members":   st.column_config.NumberColumn(format="%d"),
+            "Players in DB": st.column_config.NumberColumn(format="%d"),
+            "With Migrate":  st.column_config.NumberColumn(format="%d"),
+        },
+        on_select="rerun", selection_mode="single-row",
+        # Keying on the selected server forces a fresh (empty) selection whenever the
+        # server filter changes, instead of keeping a stale row index pointed at
+        # whatever now happens to sit in that same grid position.
+        key=f"dd_alliance_table_{dd_selected_server}",
+    )
+    dd_selected_alliance = None  # (server, alliance name, known member count) or None
+    if al_event.selection.rows:
+        sel_al = al_scope.iloc[al_event.selection.rows[0]]
+        known_members = int(sel_al["Players in DB"]) if "Players in DB" in sel_al else None
+        dd_selected_alliance = (int(sel_al["Server"]), sel_al["Alliance"], known_members)
+
+    # ── Player table, filtered by the selected alliance (or server, or nothing) ─
+    dd_known_members = None
+    if dd_selected_alliance is not None:
+        sel_server, sel_alliance_name, dd_known_members = dd_selected_alliance
+        pl_scope = dd_players[(dd_players["Server"] == sel_server) &
+                               (dd_players["Alliance"] == sel_alliance_name)]
+        st.markdown(f"**Players in {sel_alliance_name} (server {sel_server})**")
+    elif dd_selected_server is not None:
+        pl_scope = dd_players[dd_players["Server"] == dd_selected_server]
+        st.markdown(f"**Players on server {dd_selected_server}**")
+    else:
+        pl_scope = dd_players
+        st.markdown("**Players** (all servers — select a server or alliance above to narrow)")
+
+    dd_c1, dd_c2 = st.columns([3, 1])
+    dd_search = dd_c1.text_input("Search name", key="dd_search")
+    dd_candidates_only = dd_c2.checkbox("Candidates only", key="dd_candidates")
+    if dd_search:
+        pl_scope = pl_scope[pl_scope["Name"].str.contains(dd_search, case=False, na=False)]
+    if dd_candidates_only:
+        pl_scope = pl_scope[pl_scope["Candidate"]]
+
+    pl_cols = ["Server", "Name", "Tag", "Alliance", "HQ", "Candidate", "Package",
+               "Power", "Migrate Power", "Last Seen", "Scan Age (Days)"]
+    pl_cols = [c for c in pl_cols if c in pl_scope.columns]
+
+    dd_matched = len(pl_scope)
+    dd_cap = 1000
+    dd_was_capped = dd_matched > dd_cap
+    # Cap by highest Power BEFORE the display sort, same reasoning as the Player
+    # Table tab — keeps the most relevant accounts when a cap is needed at all,
+    # which in practice is only when no server/alliance has been picked yet.
+    pl_show = (pl_scope.sort_values("Power", ascending=False).head(dd_cap)
+               if dd_was_capped else pl_scope)
+    pl_show = (pl_show[pl_cols]
+               .sort_values(["Server", "Power"], ascending=[True, False])
+               .reset_index(drop=True).copy())
+    for c in ("Power", "Migrate Power"):
+        if c in pl_show.columns:
+            pl_show[c] = pl_show[c].apply(floor_compact)
+
+    st.dataframe(
+        pl_show, width='stretch', hide_index=True,
+        column_config={
+            "Server":          st.column_config.NumberColumn(format="%d"),
+            "HQ":              st.column_config.NumberColumn(format="%d"),
+            "Power":           st.column_config.NumberColumn(format="compact"),
+            "Migrate Power":   st.column_config.NumberColumn(format="compact"),
+            "Scan Age (Days)": st.column_config.NumberColumn(format="%d"),
+            "Candidate":       st.column_config.CheckboxColumn("Candidate", disabled=True),
+        },
+    )
+    cap_note = (f" (capped at {dd_cap:,} by highest Power — narrow the filters above to see more)"
+                if dd_was_capped else "")
+    st.caption(f"{len(pl_show):,} of {dd_matched:,} matching players shown{cap_note}.")
+    if (dd_known_members is not None and not dd_search and not dd_candidates_only
+            and dd_matched < dd_known_members):
+        st.caption(
+            f"⚠️ This alliance shows {dd_known_members} members in the Players in DB column "
+            f"above, but only {dd_matched} matched here by name — some members' cached "
+            "alliance name is out of date (the alliance was renamed since their last scan). "
+            "This is a known gap: the site currently matches players to alliances by name "
+            "since alliance IDs aren't in the exported data yet; the desktop Migrate Scout "
+            "tool doesn't have this issue since it joins on the real ID."
         )
 
 
