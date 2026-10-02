@@ -797,8 +797,20 @@ with tab7:
         al_scope = dd_alliances_all.copy()
         st.markdown("**Alliances** (all servers — select a server above to narrow)")
 
+    # Per-alliance Total Migrate Power — same join key as the server-table rollup
+    # above (Alliance ID when available, else (Server, Alliance) name-matching).
+    if dd_has_alliance_id:
+        al_mig = (dd_players.groupby("Alliance ID")["Migrate Power"].sum()
+                  .reset_index(name="Total Migrate Power"))
+        al_scope = al_scope.merge(al_mig, on="Alliance ID", how="left")
+    else:
+        al_mig = (dd_players.groupby(["Server", "Alliance"])["Migrate Power"].sum()
+                  .reset_index(name="Total Migrate Power"))
+        al_scope = al_scope.merge(al_mig, on=["Server", "Alliance"], how="left")
+    al_scope["Total Migrate Power"] = al_scope["Total Migrate Power"].fillna(0)
+
     al_display_cols = ["Server", "Rank", "Tag", "Alliance", "Fight Power",
-                        "Members", "Max Members", "Players in DB", "With Migrate"]
+                        "Total Migrate Power", "Members", "Players in DB", "With Migrate"]
     al_display_cols = [c for c in al_display_cols if c in al_scope.columns]
     # Keep "Alliance ID" in the underlying data (needed to filter players below) but
     # out of column_order so it never renders — a raw UUID isn't useful on screen.
@@ -807,14 +819,14 @@ with tab7:
                        .sort_values(["Server", "Rank"]).reset_index(drop=True)
 
     al_event = st.dataframe(
-        al_scope.style.format({"Fight Power": fmt_compact_2dp}),
+        al_scope.style.format({"Fight Power": fmt_compact_2dp,
+                                "Total Migrate Power": fmt_compact_2dp}),
         width='stretch', hide_index=True,
         column_order=al_display_cols,
         column_config={
             "Server":        st.column_config.NumberColumn(format="%d"),
             "Rank":          st.column_config.NumberColumn(format="%d"),
             "Members":       st.column_config.NumberColumn(format="%d"),
-            "Max Members":   st.column_config.NumberColumn(format="%d"),
             "Players in DB": st.column_config.NumberColumn(format="%d"),
             "With Migrate":  st.column_config.NumberColumn(format="%d"),
         },
