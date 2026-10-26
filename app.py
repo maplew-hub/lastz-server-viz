@@ -178,11 +178,19 @@ def render_drill(clicked, label_a, label_b):
 @st.cache_data(ttl=60)
 def load_data_local():
     con = sqlite3.connect(LOCAL_DB)
-    players_df = pd.read_sql_query("""
+    # Snapshot columns are added by Migrate Scout's _db_migrate on its next launch;
+    # select NULLs until then so the app doesn't crash against an older DB.
+    have = {r[1] for r in con.execute("PRAGMA table_info(players)")}
+    def _col(name):
+        return f"p.{name}" if name in have else "NULL"
+    players_df = pd.read_sql_query(f"""
         SELECT p.name AS Name, p.alliance_id AS [Alliance ID],
                p.alliance_abbr AS Tag, p.alliance_name AS Alliance,
                p.hq_level AS HQ, p.server AS Server,
                p.original_server AS [Orig Server], p.s3_server AS [S3 Server],
+               p.s4_server AS [S4 Server],
+               {_col("mig3_migrate_power")} AS [S4 Migrate Power],
+               {_col("mig3_snapshot_date")} AS [S4 Snapshot Date],
                p.power AS Power,
                p.migrate_power AS [Migrate Power], p.hero_power AS [Hero Power],
                p.building_power AS Building, p.science_power AS Science,
@@ -271,7 +279,7 @@ def categorize(migrate_power_series):
 
 NET_CATS = ["Super Elite", "Elite", "High Advanced", "Low Advanced", "Medium"]
 
-def net_category_table(df, from_col, to_col):
+def net_category_table(df, from_col, to_col, power_col="Migrate Power"):
     """Per-server net players gained/lost (joined - left) for each of NET_CATS, with the
     net power moved as its own numeric column next to each count, plus a leading
     Net Total Power column (net power across ALL players, not just NET_CATS). Rows cover
@@ -282,7 +290,7 @@ def net_category_table(df, from_col, to_col):
     d = df.dropna(subset=[from_col, to_col]).copy()
     d[from_col] = d[from_col].astype(int)
     d[to_col]   = d[to_col].astype(int)
-    d["_Category"] = categorize(d["Migrate Power"])
+    d["_Category"] = categorize(d[power_col])
     d["_Power"] = pd.to_numeric(d["Power"], errors="coerce").fillna(0)
 
     servers = sorted(set(d[from_col].unique()) | set(d[to_col].unique()))
@@ -328,13 +336,13 @@ NET_TABLE_COLUMN_CONFIG = {
     },
 }
 
-def category_summary(df):
+def category_summary(df, power_col="Migrate Power"):
     """Category, Count, Total Power table for a slice of players_df. Total Power stays
     numeric (raw sum) — formatted for display via Styler.format(fmt_compact_2dp) at
     the call site, not a pre-formatted string, so st.dataframe's column sort stays
     numeric."""
     d = df.copy()
-    d["Category"] = categorize(d["Migrate Power"])
+    d["Category"] = categorize(d[power_col])
     summary = (
         d.groupby("Category")
         .agg(Count=("Name", "size"), **{"Total Power": ("Power", "sum")})
@@ -367,7 +375,8 @@ def prepare(players_df, alliances_df):
     _coerce_str(alliances_df, ["Alliance", "Tag"])
     _coerce_numeric(players_df, ["Power", "Max Power", "Migrate Power", "Hero Power",
                                   "Building", "Science", "Troop", "Tank", "HQ", "Server",
-                                  "Orig Server", "S3 Server"])
+                                  "Orig Server", "S3 Server", "S4 Server",
+                                  "S4 Migrate Power"])
     _coerce_numeric(alliances_df, ["Fight Power", "Server", "Rank", "Members",
                                     "Max Members", "Players in DB", "With Migrate"])
     if "Candidate" in players_df.columns:
@@ -1276,8 +1285,6 @@ with tab5:
 
 with tab6:
     st.subheader("🔄 Migration Turnover")
-    st.caption("Uses current Power/Migrate Power snapshots — there's no historical power-at-migration-time data, "
-               "so this compares who moved vs. stayed using today's numbers.")
 
     have_mig_cols = "Orig Server" in players_df.columns and "S3 Server" in players_df.columns
     if not have_mig_cols:
@@ -1285,23 +1292,46 @@ with tab6:
         st.stop()
 
     # ── Shared migration-stage selector — drives both sections below ──────────
+    # Migration 3 (S4 → S5) needs the S4 Server snapshot column; if the data source
+    # predates it (e.g. Sheets not re-synced yet), fall back to the old 2-stage list.
+    stages = {"Migration 1 (Original → S3)": ("Orig Server", "S3 Server")}
+    if "S4 Server" in players_df.columns:
+        stages["Migration 2 (S3 → S4)"] = ("S3 Server", "S4 Server")
+        stages["Migration 3 (S4 → Current)"] = ("S4 Server", "Server")
+    else:
+        stages["Migration 2 (S3 → Current)"] = ("S3 Server", "Server")
     migration_choice = st.selectbox(
-        "Migration stage",
-        ["Migration 1 (Original → S3)", "Migration 2 (S3 → Current)"],
-        index=1,  # default to Migration 2
+        "Migration stage", list(stages),
+        index=len(stages) - 1,  # default to the latest migration
         key="turnover_mig_choice",
     )
-    if migration_choice.startswith("Migration 1"):
-        from_col, to_col = "Orig Server", "S3 Server"
+    from_col, to_col = stages[migration_choice]
+
+    # Migration 3 has a frozen migrate-power snapshot (Migrate Scout's "Freeze S4
+    # Snapshot"), so categories can be judged at migration time instead of today.
+    # Only the local DB carries it — the Sheets export doesn't (yet).
+    is_mig3 = migration_choice.startswith("Migration 3")
+    has_snapshot = (is_mig3 and "S4 Migrate Power" in players_df.columns
+                    and players_df["S4 Migrate Power"].notna().any())
+    power_col = "Migrate Power"
+    if has_snapshot:
+        basis = st.radio("Categorize by", ["Migrate Power at migration (S4 snapshot)",
+                                           "Current Migrate Power"],
+                         horizontal=True, key="turnover_power_basis")
+        if basis.startswith("Migrate Power at migration"):
+            power_col = "S4 Migrate Power"
+        st.caption("Categories use the selected migrate power. Total Power is always today's value — "
+                   "only migrate power was snapshotted.")
     else:
-        from_col, to_col = "S3 Server", "Server"
+        st.caption("Uses current Power/Migrate Power — there's no power-at-migration-time snapshot "
+                   "for this stage, so this compares who moved vs. stayed using today's numbers.")
 
     # ── High-level overview: net players gained/lost by category, per server ──
     st.markdown("### Overview by Migration")
     st.caption("Net = players joined minus players left, by category, for that migration stage. "
                "Sorted by biggest total turnover first.")
 
-    table = net_category_table(players_df, from_col, to_col)
+    table = net_category_table(players_df, from_col, to_col, power_col)
     full_height = 38 + 35 * len(table) + 3  # header + one row per server, no inner scroll
     table_styler = table.style.format(
         {c: fmt_compact_2dp for c in NET_TABLE_COMPACT_COLS if c in table.columns})
@@ -1338,7 +1368,7 @@ with tab6:
         with box_col:
             st.markdown(f"**{title}**")
             st.caption(f"{len(box_df):,} players · {fmt_power(box_df['Power'].sum())} total power")
-            cat_summary = category_summary(box_df)
+            cat_summary = category_summary(box_df, power_col)
             st.dataframe(cat_summary.style.format({"Total Power": fmt_compact_2dp}),
                          hide_index=True, width='stretch')
 
@@ -1346,10 +1376,14 @@ with tab6:
     for dtab, (title, box_df) in zip(detail_tabs, boxes):
         with dtab:
             disp = box_df.sort_values("Power", ascending=False).copy()
-            display_cols = ["Name", "Tag", "Alliance", "HQ", "Power", "Migrate Power",
-                            "Orig Server", "S3 Server", "Server"]
+            display_cols = ["Name", "Tag", "Alliance", "HQ", "Power", "Migrate Power"]
+            if has_snapshot:
+                disp["Gained Since S4"] = disp["Migrate Power"] - disp["S4 Migrate Power"]
+                display_cols += ["S4 Migrate Power", "Gained Since S4", "S4 Snapshot Date"]
+            display_cols += ["Orig Server", "S3 Server", "S4 Server", "Server"]
             display_cols = [c for c in display_cols if c in disp.columns]
-            disp_compact_cols = [c for c in ("Power", "Migrate Power") if c in disp.columns]
+            disp_compact_cols = [c for c in ("Power", "Migrate Power", "S4 Migrate Power",
+                                             "Gained Since S4") if c in disp.columns]
             st.dataframe(
                 disp[display_cols].style.format({c: fmt_compact_2dp for c in disp_compact_cols}),
                 hide_index=True, width='stretch')
