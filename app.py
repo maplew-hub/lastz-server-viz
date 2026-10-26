@@ -264,22 +264,43 @@ CAT_LABELS = {
     "Unscanned":     "Unscanned",
 }
 
-def categorize(migrate_power_series):
+# (lower bound, category) pairs, ascending — a player is the last category whose
+# bound their migrate power is strictly above; scanned players below all bounds are
+# Regular, no migrate power is Unscanned.
+CAT_THRESHOLDS = [
+    (40_000_000,  "Medium"),
+    (80_000_000,  "Low Advanced"),
+    (120_000_000, "High Advanced"),
+    (160_000_000, "Elite"),
+    (300_000_000, "Super Elite"),
+]
+
+def categorize(migrate_power_series, thresholds=CAT_THRESHOLDS):
     """Super Elite >300M, Elite >160M, High Advanced >120M, Low Advanced >80M,
-    Medium >40M, Regular (scanned, <=40M), Unscanned (no migrate power)."""
+    Medium >40M, Regular (scanned, <=40M), Unscanned (no migrate power) — by
+    default; pass another thresholds list for a different scheme."""
     mp = pd.to_numeric(migrate_power_series, errors="coerce")
     cat = pd.Series("Unscanned", index=migrate_power_series.index)
-    cat[mp.notna()]       = "Regular"
-    cat[mp > 40_000_000]  = "Medium"
-    cat[mp > 80_000_000]  = "Low Advanced"
-    cat[mp > 120_000_000] = "High Advanced"
-    cat[mp > 160_000_000] = "Elite"
-    cat[mp > 300_000_000] = "Super Elite"
+    cat[mp.notna()] = "Regular"
+    for bound, name in thresholds:
+        cat[mp > bound] = name
     return cat
 
 NET_CATS = ["Super Elite", "Elite", "High Advanced", "Low Advanced", "Medium"]
 
-def net_category_table(df, from_col, to_col, power_col="Migrate Power"):
+# Migration 3 (S4 → Current) scheme, set 2026-10-26. Only the Migration Turnover tab's
+# Migration 3 stage uses it; every other view keeps the 7-tier scheme above.
+MIG3_CAT_THRESHOLDS = [
+    (60_000_000,  "Medium"),
+    (160_000_000, "Advanced"),
+    (270_000_000, "Elite"),
+    (400_000_000, "Super Elite"),
+]
+MIG3_CAT_ORDER = ["Super Elite", "Elite", "Advanced", "Medium", "Regular", "Unscanned"]
+MIG3_NET_CATS  = ["Super Elite", "Elite", "Advanced", "Medium"]
+
+def net_category_table(df, from_col, to_col, power_col="Migrate Power",
+                       thresholds=CAT_THRESHOLDS, net_cats=NET_CATS):
     """Per-server net players gained/lost (joined - left) for each of NET_CATS, with the
     net power moved as its own numeric column next to each count, plus a leading
     Net Total Power column (net power across ALL players, not just NET_CATS). Rows cover
@@ -290,7 +311,7 @@ def net_category_table(df, from_col, to_col, power_col="Migrate Power"):
     d = df.dropna(subset=[from_col, to_col]).copy()
     d[from_col] = d[from_col].astype(int)
     d[to_col]   = d[to_col].astype(int)
-    d["_Category"] = categorize(d[power_col])
+    d["_Category"] = categorize(d[power_col], thresholds)
     d["_Power"] = pd.to_numeric(d["Power"], errors="coerce").fillna(0)
 
     servers = sorted(set(d[from_col].unique()) | set(d[to_col].unique()))
@@ -303,7 +324,7 @@ def net_category_table(df, from_col, to_col, power_col="Migrate Power"):
 
         row = {"Server": s, "Net Total Power": total_net_power}
         total_net_count = 0
-        for c in NET_CATS:
+        for c in net_cats:
             j = joined_all[joined_all["_Category"] == c]
             l = left_all[left_all["_Category"] == c]
             net_count = len(j) - len(l)
@@ -319,7 +340,7 @@ def net_category_table(df, from_col, to_col, power_col="Migrate Power"):
            .drop(columns="_sort")
            .reset_index(drop=True))
     cols = ["Server", "Net Total Power"]
-    for c in NET_CATS:
+    for c in net_cats:
         cols += [f"Net {c} Players", f"Net {c} Power"]
     return out[cols]
 
@@ -327,26 +348,30 @@ def net_category_table(df, from_col, to_col, power_col="Migrate Power"):
 # call site (see fmt_compact_2dp) rather than column_config — kept out of this dict
 # entirely, since a column_config NumberColumn would take precedence over the
 # Styler's format and win back to the built-in 0-1-decimal "compact" rendering.
-NET_TABLE_COMPACT_COLS = ["Net Total Power"] + [f"Net {c} Power" for c in NET_CATS]
-NET_TABLE_COLUMN_CONFIG = {
-    "Server": st.column_config.NumberColumn(format="%d"),
-    **{
-        f"Net {c} Players": st.column_config.NumberColumn(format="%+d")
-        for c in NET_CATS
-    },
-}
+def net_table_compact_cols(net_cats=NET_CATS):
+    return ["Net Total Power"] + [f"Net {c} Power" for c in net_cats]
 
-def category_summary(df, power_col="Migrate Power"):
+def net_table_column_config(net_cats=NET_CATS):
+    return {
+        "Server": st.column_config.NumberColumn(format="%d"),
+        **{
+            f"Net {c} Players": st.column_config.NumberColumn(format="%+d")
+            for c in net_cats
+        },
+    }
+
+def category_summary(df, power_col="Migrate Power",
+                     thresholds=CAT_THRESHOLDS, cat_order=CAT_ORDER):
     """Category, Count, Total Power table for a slice of players_df. Total Power stays
     numeric (raw sum) — formatted for display via Styler.format(fmt_compact_2dp) at
     the call site, not a pre-formatted string, so st.dataframe's column sort stays
     numeric."""
     d = df.copy()
-    d["Category"] = categorize(d[power_col])
+    d["Category"] = categorize(d[power_col], thresholds)
     summary = (
         d.groupby("Category")
         .agg(Count=("Name", "size"), **{"Total Power": ("Power", "sum")})
-        .reindex(CAT_ORDER)
+        .reindex(cat_order)
         .fillna(0)
     )
     summary["Count"] = summary["Count"].astype(int)
@@ -1326,17 +1351,27 @@ with tab6:
         st.caption("Uses current Power/Migrate Power — there's no power-at-migration-time snapshot "
                    "for this stage, so this compares who moved vs. stayed using today's numbers.")
 
+    if is_mig3:
+        cat_scheme = dict(thresholds=MIG3_CAT_THRESHOLDS, cat_order=MIG3_CAT_ORDER,
+                          net_cats=MIG3_NET_CATS)
+        st.caption("Migration 3 categories: Regular ≤60M · Medium 60M–160M · Advanced 160M–270M · "
+                   "Elite 270M–400M · Super Elite 400M+")
+    else:
+        cat_scheme = dict(thresholds=CAT_THRESHOLDS, cat_order=CAT_ORDER, net_cats=NET_CATS)
+
     # ── High-level overview: net players gained/lost by category, per server ──
     st.markdown("### Overview by Migration")
     st.caption("Net = players joined minus players left, by category, for that migration stage. "
                "Sorted by biggest total turnover first.")
 
-    table = net_category_table(players_df, from_col, to_col, power_col)
+    table = net_category_table(players_df, from_col, to_col, power_col,
+                               cat_scheme["thresholds"], cat_scheme["net_cats"])
     full_height = 38 + 35 * len(table) + 3  # header + one row per server, no inner scroll
     table_styler = table.style.format(
-        {c: fmt_compact_2dp for c in NET_TABLE_COMPACT_COLS if c in table.columns})
+        {c: fmt_compact_2dp for c in net_table_compact_cols(cat_scheme["net_cats"])
+         if c in table.columns})
     st.dataframe(table_styler, hide_index=True, width='stretch', height=full_height,
-                 column_config=NET_TABLE_COLUMN_CONFIG)
+                 column_config=net_table_column_config(cat_scheme["net_cats"]))
 
     # ── Per-server turnover detail ──────────────────────────────────────────────
     st.markdown("### Per-Server Detail")
@@ -1368,7 +1403,8 @@ with tab6:
         with box_col:
             st.markdown(f"**{title}**")
             st.caption(f"{len(box_df):,} players · {fmt_power(box_df['Power'].sum())} total power")
-            cat_summary = category_summary(box_df, power_col)
+            cat_summary = category_summary(box_df, power_col,
+                                           cat_scheme["thresholds"], cat_scheme["cat_order"])
             st.dataframe(cat_summary.style.format({"Total Power": fmt_compact_2dp}),
                          hide_index=True, width='stretch')
 
