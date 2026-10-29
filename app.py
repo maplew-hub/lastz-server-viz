@@ -297,22 +297,31 @@ MIG3_CAT_THRESHOLDS = [
     (400_000_000, "Super Elite"),
 ]
 MIG3_CAT_ORDER = ["Super Elite", "Elite", "Advanced", "Medium", "Regular", "Unscanned"]
+
+# Servers the game merged during the S4→S5 migration (old → new). Those players
+# didn't transfer, so Migration 3 maps both ends through this before comparing —
+# only real transfers (incl. off/onto a merged server) count. Keep in sync with
+# MIG3_SERVER_MERGES in migrate_scout.py.
+MIG3_SERVER_MERGES = {208: 200, 213: 251, 222: 215, 228: 256}
 MIG3_NET_CATS  = ["Super Elite", "Elite", "Advanced", "Medium"]
 
 def net_category_table(df, from_col, to_col, power_col="Migrate Power",
-                       thresholds=CAT_THRESHOLDS, net_cats=NET_CATS):
+                       thresholds=CAT_THRESHOLDS, net_cats=NET_CATS,
+                       sum_col="Power", sum_label="Power"):
     """Per-server net players gained/lost (joined - left) for each of NET_CATS, with the
     net power moved as its own numeric column next to each count, plus a leading
     Net Total Power column (net power across ALL players, not just NET_CATS). Rows cover
     every server appearing on either side of the migration; sorted by the magnitude of
     total net player change (across NET_CATS), biggest turnover first. All numeric —
     formatting for display is applied via column_config at the call site so that
-    st.dataframe's column-header sort stays numeric instead of alphabetic."""
+    st.dataframe's column-header sort stays numeric instead of alphabetic.
+    `sum_col` is what gets totalled (Power or a migrate-power column); `sum_label`
+    names it in the headers ("Net Elite Power" vs "Net Elite Migrate Power")."""
     d = df.dropna(subset=[from_col, to_col]).copy()
     d[from_col] = d[from_col].astype(int)
     d[to_col]   = d[to_col].astype(int)
     d["_Category"] = categorize(d[power_col], thresholds)
-    d["_Power"] = pd.to_numeric(d["Power"], errors="coerce").fillna(0)
+    d["_Power"] = pd.to_numeric(d[sum_col], errors="coerce").fillna(0)
 
     servers = sorted(set(d[from_col].unique()) | set(d[to_col].unique()))
 
@@ -322,7 +331,7 @@ def net_category_table(df, from_col, to_col, power_col="Migrate Power",
         left_all   = d[(d[from_col] == s) & (d[to_col] != s)]
         total_net_power = joined_all["_Power"].sum() - left_all["_Power"].sum()
 
-        row = {"Server": s, "Net Total Power": total_net_power}
+        row = {"Server": s, f"Net Total {sum_label}": total_net_power}
         total_net_count = 0
         for c in net_cats:
             j = joined_all[joined_all["_Category"] == c]
@@ -330,7 +339,7 @@ def net_category_table(df, from_col, to_col, power_col="Migrate Power",
             net_count = len(j) - len(l)
             net_power = j["_Power"].sum() - l["_Power"].sum()
             row[f"Net {c} Players"] = net_count
-            row[f"Net {c} Power"]   = net_power
+            row[f"Net {c} {sum_label}"] = net_power
             total_net_count += net_count
         row["_sort"] = abs(total_net_count)
         records.append(row)
@@ -339,17 +348,17 @@ def net_category_table(df, from_col, to_col, power_col="Migrate Power",
            .sort_values("_sort", ascending=False)
            .drop(columns="_sort")
            .reset_index(drop=True))
-    cols = ["Server", "Net Total Power"]
+    cols = ["Server", f"Net Total {sum_label}"]
     for c in net_cats:
-        cols += [f"Net {c} Players", f"Net {c} Power"]
+        cols += [f"Net {c} Players", f"Net {c} {sum_label}"]
     return out[cols]
 
 # "Net Total Power"/"Net {c} Power" are 2-decimal-compact via Styler.format() at the
 # call site (see fmt_compact_2dp) rather than column_config — kept out of this dict
 # entirely, since a column_config NumberColumn would take precedence over the
 # Styler's format and win back to the built-in 0-1-decimal "compact" rendering.
-def net_table_compact_cols(net_cats=NET_CATS):
-    return ["Net Total Power"] + [f"Net {c} Power" for c in net_cats]
+def net_table_compact_cols(net_cats=NET_CATS, sum_label="Power"):
+    return [f"Net Total {sum_label}"] + [f"Net {c} {sum_label}" for c in net_cats]
 
 def net_table_column_config(net_cats=NET_CATS):
     return {
@@ -361,7 +370,8 @@ def net_table_column_config(net_cats=NET_CATS):
     }
 
 def category_summary(df, power_col="Migrate Power",
-                     thresholds=CAT_THRESHOLDS, cat_order=CAT_ORDER):
+                     thresholds=CAT_THRESHOLDS, cat_order=CAT_ORDER,
+                     sum_col="Power", sum_label="Power"):
     """Category, Count, Total Power table for a slice of players_df. Total Power stays
     numeric (raw sum) — formatted for display via Styler.format(fmt_compact_2dp) at
     the call site, not a pre-formatted string, so st.dataframe's column sort stays
@@ -370,12 +380,12 @@ def category_summary(df, power_col="Migrate Power",
     d["Category"] = categorize(d[power_col], thresholds)
     summary = (
         d.groupby("Category")
-        .agg(Count=("Name", "size"), **{"Total Power": ("Power", "sum")})
+        .agg(Count=("Name", "size"), **{f"Total {sum_label}": (sum_col, "sum")})
         .reindex(cat_order)
         .fillna(0)
     )
     summary["Count"] = summary["Count"].astype(int)
-    return summary[["Count", "Total Power"]].reset_index()
+    return summary[["Count", f"Total {sum_label}"]].reset_index()
 
 STALE_CUTOFF_DAYS = 7
 STALE_CUTOFF_DAYS_RED = 14
@@ -1322,7 +1332,11 @@ with tab6:
     stages = {"Migration 1 (Original → S3)": ("Orig Server", "S3 Server")}
     if "S4 Server" in players_df.columns:
         stages["Migration 2 (S3 → S4)"] = ("S3 Server", "S4 Server")
-        stages["Migration 3 (S4 → Current)"] = ("S4 Server", "Server")
+        # Merge-mapped copies of both ends (see MIG3_SERVER_MERGES), so merged
+        # players read as stayed. Detail tables still show the raw S4 Server/Server.
+        players_df["_mig3_from"] = players_df["S4 Server"].replace(MIG3_SERVER_MERGES)
+        players_df["_mig3_to"]   = players_df["Server"].replace(MIG3_SERVER_MERGES)
+        stages["Migration 3 (S4 → Current)"] = ("_mig3_from", "_mig3_to")
     else:
         stages["Migration 2 (S3 → Current)"] = ("S3 Server", "Server")
     migration_choice = st.selectbox(
@@ -1356,8 +1370,20 @@ with tab6:
                           net_cats=MIG3_NET_CATS)
         st.caption("Migration 3 categories: Regular ≤60M · Medium 60M–160M · Advanced 160M–270M · "
                    "Elite 270M–400M · Super Elite 400M+")
+        st.caption("Server merges are not counted as migrations: "
+                   + " · ".join(f"{a}→{b}" for a, b in MIG3_SERVER_MERGES.items())
+                   + ". Merged servers' players count under the server they merged into.")
     else:
         cat_scheme = dict(thresholds=CAT_THRESHOLDS, cat_order=CAT_ORDER, net_cats=NET_CATS)
+
+    # What the power totals add up: today's total Power, or the same migrate power
+    # the categories use (the S4 snapshot when that basis is selected).
+    sum_basis = st.radio("Power totals", ["Total Power", "Migrate Power"],
+                         horizontal=True, key="turnover_sum_basis")
+    if sum_basis == "Migrate Power":
+        sum_col, sum_label = power_col, "Migrate Power"
+    else:
+        sum_col, sum_label = "Power", "Power"
 
     # ── High-level overview: net players gained/lost by category, per server ──
     st.markdown("### Overview by Migration")
@@ -1365,10 +1391,11 @@ with tab6:
                "Sorted by biggest total turnover first.")
 
     table = net_category_table(players_df, from_col, to_col, power_col,
-                               cat_scheme["thresholds"], cat_scheme["net_cats"])
+                               cat_scheme["thresholds"], cat_scheme["net_cats"],
+                               sum_col, sum_label)
     full_height = 38 + 35 * len(table) + 3  # header + one row per server, no inner scroll
     table_styler = table.style.format(
-        {c: fmt_compact_2dp for c in net_table_compact_cols(cat_scheme["net_cats"])
+        {c: fmt_compact_2dp for c in net_table_compact_cols(cat_scheme["net_cats"], sum_label)
          if c in table.columns})
     st.dataframe(table_styler, hide_index=True, width='stretch', height=full_height,
                  column_config=net_table_column_config(cat_scheme["net_cats"]))
@@ -1402,16 +1429,19 @@ with tab6:
     for box_col, (title, box_df) in zip(box_cols, boxes):
         with box_col:
             st.markdown(f"**{title}**")
-            st.caption(f"{len(box_df):,} players · {fmt_power(box_df['Power'].sum())} total power")
+            st.caption(f"{len(box_df):,} players · "
+                       f"{fmt_power(pd.to_numeric(box_df[sum_col], errors='coerce').sum())} "
+                       f"total {sum_label.lower()}")
             cat_summary = category_summary(box_df, power_col,
-                                           cat_scheme["thresholds"], cat_scheme["cat_order"])
-            st.dataframe(cat_summary.style.format({"Total Power": fmt_compact_2dp}),
+                                           cat_scheme["thresholds"], cat_scheme["cat_order"],
+                                           sum_col, sum_label)
+            st.dataframe(cat_summary.style.format({f"Total {sum_label}": fmt_compact_2dp}),
                          hide_index=True, width='stretch')
 
     detail_tabs = st.tabs([title for title, _ in boxes])
     for dtab, (title, box_df) in zip(detail_tabs, boxes):
         with dtab:
-            disp = box_df.sort_values("Power", ascending=False).copy()
+            disp = box_df.sort_values(sum_col, ascending=False).copy()
             display_cols = ["Name", "Tag", "Alliance", "HQ", "Power", "Migrate Power"]
             if has_snapshot:
                 disp["Gained Since S4"] = disp["Migrate Power"] - disp["S4 Migrate Power"]
