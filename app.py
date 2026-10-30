@@ -252,6 +252,15 @@ def _coerce_numeric(df, cols):
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce")
 
+SERVER_COLS = ["Server", "Orig Server", "S3 Server", "S4 Server"]
+
+def _coerce_server(df):
+    """Server numbers as nullable whole numbers (Int64). Plain to_numeric turns a
+    column with any blank into float64, which every table then shows as "208.0"."""
+    for col in SERVER_COLS:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce").round().astype("Int64")
+
 CAT_ORDER = ["Super Elite", "Elite", "High Advanced", "Low Advanced", "Medium", "Regular", "Unscanned"]
 
 CAT_LABELS = {
@@ -297,6 +306,25 @@ MIG3_CAT_THRESHOLDS = [
     (400_000_000, "Super Elite"),
 ]
 MIG3_CAT_ORDER = ["Super Elite", "Elite", "Advanced", "Medium", "Regular", "Unscanned"]
+
+# Tale of the Tape scheme, set 2026-10-30: the Migration 3 bands with Advanced
+# split at 220M, for comparing servers ahead of the S4→S5 move.
+TAPE_CAT_THRESHOLDS = [
+    (60_000_000,  "Medium"),
+    (160_000_000, "Low Advanced"),
+    (220_000_000, "High Advanced"),
+    (270_000_000, "Elite"),
+    (400_000_000, "Super Elite"),
+]
+TAPE_CAT_LABELS = {
+    "Super Elite":   "Super Elite (400M+)",
+    "Elite":         "Elite (270M–400M)",
+    "High Advanced": "High Advanced (220M–270M)",
+    "Low Advanced":  "Low Advanced (160M–220M)",
+    "Medium":        "Medium (60M–160M)",
+    "Regular":       "Regular (≤60M)",
+    "Unscanned":     "Unscanned",
+}
 
 # Servers the game merged during the S4→S5 migration (old → new). Those players
 # didn't transfer, so Migration 3 maps both ends through this before comparing —
@@ -414,6 +442,8 @@ def prepare(players_df, alliances_df):
                                   "S4 Migrate Power"])
     _coerce_numeric(alliances_df, ["Fight Power", "Server", "Rank", "Members",
                                     "Max Members", "Players in DB", "With Migrate"])
+    _coerce_server(players_df)
+    _coerce_server(alliances_df)
     if "Candidate" in players_df.columns:
         players_df["Candidate"] = _coerce_bool_flag(players_df["Candidate"])
     else:
@@ -1156,8 +1186,8 @@ with tab5:
 
     cat_a = pa.copy()
     cat_b = pb.copy()
-    cat_a["Category"] = categorize(cat_a["Migrate Power"])
-    cat_b["Category"] = categorize(cat_b["Migrate Power"])
+    cat_a["Category"] = categorize(cat_a["Migrate Power"], TAPE_CAT_THRESHOLDS)
+    cat_b["Category"] = categorize(cat_b["Migrate Power"], TAPE_CAT_THRESHOLDS)
 
     def _cat_stats(df):
         g = (df.groupby("Category")
@@ -1185,7 +1215,7 @@ with tab5:
                 va = cat_stats_a.loc[cat, col]
                 vb = cat_stats_b.loc[cat, col]
                 cat_rows.append({
-                    "label": CAT_LABELS[cat], "raw_a": va, "raw_b": vb,
+                    "label": TAPE_CAT_LABELS[cat], "raw_a": va, "raw_b": vb,
                     "fmt_a": fmt_fn(va), "fmt_b": fmt_fn(vb),
                     "drill_a": cat_drill_a[cat], "drill_b": cat_drill_b[cat],
                 })
