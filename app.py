@@ -1318,11 +1318,12 @@ with tab5:
 
     TIERS = [3, 5, 10, 20, 50, 100]
     POWER_COLS = [
-        ("Power",      "Power"),
-        ("Max Power",  "Max Power"),
-        ("Tech Power", "Science"),
-        ("Tank Power", "Tank"),
-        ("Hero Power", "Hero Power"),
+        ("Power",         "Power"),
+        ("Migrate Power", "Migrate Power"),
+        ("Max Power",     "Max Power"),
+        ("Tech Power",    "Science"),
+        ("Tank Power",    "Tank"),
+        ("Hero Power",    "Hero Power"),
     ]
 
     power_subtabs = st.tabs([label for label, _ in POWER_COLS])
