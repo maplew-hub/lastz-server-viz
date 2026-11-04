@@ -1346,6 +1346,66 @@ with tab5:
             clicked = render_tape_table(tier_rows, server_a, server_b, key=f"tape_tier_{col}")
             render_drill(clicked, server_a, server_b)
 
+    # ── Section 7: Alliance Strength (top 10 players' migrate power) ─────────
+    # What each alliance can muster on its own: for each server's top 10 alliances
+    # (in-game rank), the summed migrate power of its 10 strongest players, ranked
+    # by that sum rather than by alliance rank.
+    st.markdown("---")
+    st.markdown("#### Alliance Strength — Top 10 Players' Migrate Power")
+    st.caption("Server's top 10 alliances by in-game rank, re-ranked by the combined migrate "
+               "power of each alliance's 10 strongest players. Players without a migrate "
+               "power scan count as 0 — the (n/10) shows how many were scanned when it's "
+               "fewer than 10. Click a value to see the players.")
+
+    use_alliance_id = ("Alliance ID" in players_df.columns and "Alliance ID" in alliances_df.columns
+                       and alliances_df["Alliance ID"].notna().any())
+
+    def _alliance_strength(players, alliances):
+        out = []
+        for _, al in alliances.dropna(subset=["Rank"]).sort_values("Rank").head(10).iterrows():
+            if use_alliance_id and pd.notna(al["Alliance ID"]) and al["Alliance ID"] != "":
+                members = players[players["Alliance ID"] == al["Alliance ID"]]
+            else:
+                members = players[players["Tag"] == al["Tag"]]
+            top = (members.assign(_mp=pd.to_numeric(members["Migrate Power"], errors="coerce"))
+                          .dropna(subset=["_mp"])
+                          .sort_values("_mp", ascending=False)
+                          .head(10))
+            out.append({"tag": al["Tag"], "name": al["Alliance"], "rank": int(al["Rank"]),
+                        "sum": top["_mp"].sum(), "n": len(top),
+                        "players": top.drop(columns="_mp")})
+        return sorted(out, key=lambda r: r["sum"], reverse=True)
+
+    def _strength_fmt(r):
+        if r is None:
+            return "—"
+        scanned = f" ({r['n']}/10)" if r["n"] < 10 else ""
+        return f"{r['tag']} · {fmt_power(r['sum'])}{scanned}"
+
+    strength_a = _alliance_strength(pa, aa)
+    strength_b = _alliance_strength(pb, ab)
+    strength_rows = []
+    for i in range(max(len(strength_a), len(strength_b))):
+        ra = strength_a[i] if i < len(strength_a) else None
+        rb = strength_b[i] if i < len(strength_b) else None
+        strength_rows.append({
+            "label": f"#{i + 1}",
+            "raw_a": ra["sum"] if ra else 0, "raw_b": rb["sum"] if rb else 0,
+            "fmt_a": _strength_fmt(ra), "fmt_b": _strength_fmt(rb),
+            "drill_a": ra["players"] if ra else None,
+            "drill_b": rb["players"] if rb else None,
+        })
+    if strength_rows:
+        clicked = render_tape_table(strength_rows, server_a, server_b, mid_header="Rank",
+                                    key="tape_alliance_strength")
+        render_drill(clicked, server_a, server_b)
+        tot_a = sum(r["sum"] for r in strength_a)
+        tot_b = sum(r["sum"] for r in strength_b)
+        st.caption(f"Combined across all 10: Server {server_a} {fmt_power(tot_a)} · "
+                   f"Server {server_b} {fmt_power(tot_b)}")
+    else:
+        st.caption("No ranked alliances recorded for these servers.")
+
 
 # ── Tab 6: Migration Turnover ─────────────────────────────────────────────────
 
